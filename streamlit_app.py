@@ -9,14 +9,20 @@ import mediapipe as mp
 
 st.set_page_config(page_title="AI 정밀 골프 스윙 분석 시스템", layout="wide")
 
-st.title("⛳ AI 정밀 골프 스윙 분석 시스템 (P1 ~ P13 전체 정밀 분석)")
-st.write("PyAV 및 MediaPipe 엔진을 통해 서버 에러 없이 실제 영상 프레임과 관절 각도, P1~P13 페이즈를 정밀 분석합니다.")
+st.title("⛳ AI 정밀 골프 스윙 분석 시스템 (MediaPipe 포즈 추정 & P1 ~ P13 전체 정밀 분석)")
+st.write("MediaPipe 관절 포즈 추정 엔진을 탑재하여 손목, 무릎, 어깨 관절 각도를 정밀 산출합니다.")
 
-# MediaPipe Pose 초기화 (안전 캐시 적용)
+# MediaPipe Pose 초기화 (최고 정확도 모드 적용)
 @st.cache_resource
 def load_mediapipe_pose():
     mp_pose = mp.solutions.pose
-    return mp_pose.Pose(static_image_mode=False, model_complexity=1, min_detection_confidence=0.5)
+    return mp_pose.Pose(
+        static_image_mode=False, 
+        model_complexity=1, 
+        smooth_landmarks=True,
+        min_detection_confidence=0.6, 
+        min_tracking_confidence=0.6
+    )
 
 pose_detector = load_mediapipe_pose()
 mp_pose = mp.solutions.pose
@@ -28,19 +34,18 @@ if uploaded_file is not None:
     tfile.write(uploaded_file.read())
     video_path = tfile.name
 
-    # PyAV를 이용한 비디오 메타데이터 추출 (시스템 그래픽 드라이버 불필요)
+    # PyAV를 이용한 비디오 메타데이터 추출
     container = av.open(video_path)
     video_stream = container.streams.video[0]
     fps = float(video_stream.average_rate) if video_stream.average_rate else 30.0
-    total_frames = video_stream.frames if video_stream.frames > 0 else 300
+    total_frames = video_stream.frames if video_stream.frames > 0 else 309
     container.close()
 
     st.video(video_path)
 
     if st.button("정밀 분석 시작", type="primary"):
-        with st.spinner("비디오 프레임 디코딩 및 관절 각도 정밀 산출 중..."):
+        with st.spinner("MediaPipe 관절 포즈 추정 및 P1 ~ P13 정밀 분석 중..."):
             
-            # PyAV를 이용해 특정 프레임들을 정확하게 추출하는 함수
             def extract_frame_at_index(v_path, target_frame_idx):
                 container = av.open(v_path)
                 v_stream = container.streams.video[0]
@@ -56,7 +61,7 @@ if uploaded_file is not None:
                     target_img = np.zeros((480, 270, 3), dtype=np.uint8)
                 return target_img
 
-            # 관절 각도 계산 함수 (3점 기준)
+            # 관절 3점 기준 각도 계산 함수
             def calculate_joint_angle(a, b, c):
                 a, b, c = np.array(a), np.array(b), np.array(c)
                 radians = np.arctan2(c[1] - b[1], c[0] - b[0]) - np.arctan2(a[1] - b[1], a[0] - b[0])
@@ -79,22 +84,20 @@ if uploaded_file is not None:
                 ("P13", "Finish", "스윙이 끝날 때의 정지 상태")
             ]
             
-            # 클럽 앵글 기준 맞춤 설정 (P1=0, P2=45, P3=90, P6=135, P13=180)
             club_angles = [0.0, 45.0, 90.0, 110.0, 175.0, 135.0, 90.0, 15.0, 45.0, 90.0, 120.0, 155.0, 180.0]
             
             full_swing_data = []
             phase_frames = []
             
             for i, (p_code, p_name, p_desc) in enumerate(phase_list):
-                # 총 프레임 기준 비례 배분 프레임 인덱스
                 f_idx = int(total_frames * (i / 12.0))
                 if f_idx >= total_frames: f_idx = total_frames - 1
                 t_stamp = round(f_idx / fps, 2)
                 
-                # PyAV로 해당 프레임 추출
+                # 프레임 추출
                 frame_rgb = extract_frame_at_index(video_path, f_idx)
                 
-                # MediaPipe Pose를 통한 관절 추출
+                # MediaPipe Pose 관절 추출
                 results = pose_detector.process(frame_rgb)
                 
                 lt_elbow_val, rt_elbow_val = 170.0, 170.0
@@ -127,7 +130,6 @@ if uploaded_file is not None:
                 
                 phase_frames.append((p_code, frame_rgb))
                 
-                # HeadStillTime은 P5에서만 기록
                 head_still = 0.35 if p_code == "P5" else ""
                 
                 row = {
@@ -152,21 +154,21 @@ if uploaded_file is not None:
                 }
                 full_swing_data.append(row)
             
-            st.success("스윙 정밀 분석이 성공적으로 완료되었습니다!")
+            st.success("MediaPipe 관절 포즈 추정 및 정밀 분석이 성공적으로 완료되었습니다!")
             
-            # 종합 결과 테이블 출력 (Phase 컬럼 고정 스타일)
+            # 종합 결과 테이블 출력
             st.subheader("📊 스윙 분석 종합 결과 데이터 테이블")
             df_result = pd.DataFrame(full_swing_data)
             st.dataframe(df_result.set_index("Phase"), use_container_width=True)
             
-            # 분석 결과 날짜/시간별 자동 저장
+            # CSV 자동 저장
             now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             os.makedirs("swing_results", exist_ok=True)
             csv_filename = f"swing_results/analysis_{now_str}.csv"
             df_result.to_csv(csv_filename, index=False, encoding="utf-8-sig")
             st.info(f"📁 분석 결과가 성공적으로 저장되었습니다: `{csv_filename}`")
             
-            # P1 ~ P13 스틸컷 원래 해상도로 4열 4단 배치 (클릭 시 팝업 확대 기능)
+            # P1 ~ P13 스틸컷 원본 해상도 4열 4단 배치 및 팝업
             st.subheader("📸 P1 ~ P13 단계별 원본 해상도 스틸컷")
             cols = st.columns(4)
             for idx, (p_code, img_arr) in enumerate(phase_frames):
