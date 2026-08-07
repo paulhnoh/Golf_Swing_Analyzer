@@ -12,7 +12,7 @@ st.set_page_config(page_title="AI 정밀 골프 스윙 분석 시스템", layout
 st.title("⛳ AI 정밀 골프 스윙 분석 시스템 (MediaPipe 포즈 추정 & P1 ~ P13 전체 정밀 분석)")
 st.write("MediaPipe 관절 포즈 추정 엔진을 탑재하여 손목, 무릎, 어깨 관절 각도를 정밀 산출합니다.")
 
-# MediaPipe Pose 초기화 (최고 정확도 모드 적용)
+# MediaPipe Pose 초기화 (안전 캐시 적용)
 @st.cache_resource
 def load_mediapipe_pose():
     mp_pose = mp.solutions.pose
@@ -94,7 +94,6 @@ if uploaded_file is not None:
                 if f_idx >= total_frames: f_idx = total_frames - 1
                 t_stamp = round(f_idx / fps, 2)
                 
-                # 프레임 추출
                 frame_rgb = extract_frame_at_index(video_path, f_idx)
                 
                 # MediaPipe Pose 관절 추출
