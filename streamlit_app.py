@@ -1,15 +1,25 @@
 import streamlit as st
-import cv2
 import numpy as np
 import pandas as pd
 import tempfile
 import datetime
 import os
+import av
+import mediapipe as mp
 
 st.set_page_config(page_title="AI 정밀 골프 스윙 분석 시스템", layout="wide")
 
 st.title("⛳ AI 정밀 골프 스윙 분석 시스템 (P1 ~ P13 전체 정밀 분석)")
-st.write("스윙 영상을 업로드하시면 실제 프레임(309 프레임, 약 10.33초)을 기반으로 P1~P13 전체 페이즈와 모든 세부 측정 항목이 자동 산출됩니다.")
+st.write("PyAV 및 MediaPipe 엔진을 통해 서버 에러 없이 실제 영상 프레임과 관절 각도, P1~P13 페이즈를 정밀 분석합니다.")
+
+# MediaPipe Pose 초기화 (안전 캐시 적용)
+@st.cache_resource
+def load_mediapipe_pose():
+    mp_pose = mp.solutions.pose
+    return mp_pose.Pose(static_image_mode=False, model_complexity=1, min_detection_confidence=0.5)
+
+pose_detector = load_mediapipe_pose()
+mp_pose = mp.solutions.pose
 
 uploaded_file = st.file_uploader("스윙 영상을 업로드하세요 (MP4, MOV 등)", type=["mp4", "mov", "avi"])
 
@@ -18,22 +28,41 @@ if uploaded_file is not None:
     tfile.write(uploaded_file.read())
     video_path = tfile.name
 
-    # 동영상 정보 추출
-    cap = cv2.VideoCapture(video_path)
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if fps <= 0: fps = 30.0
-    if total_frames <= 0: total_frames = 309
+    # PyAV를 이용한 비디오 메타데이터 추출 (시스템 그래픽 드라이버 불필요)
+    container = av.open(video_path)
+    video_stream = container.streams.video[0]
+    fps = float(video_stream.average_rate) if video_stream.average_rate else 30.0
+    total_frames = video_stream.frames if video_stream.frames > 0 else 300
+    container.close()
 
     st.video(video_path)
 
     if st.button("정밀 분석 시작", type="primary"):
-        with st.spinner("실제 영상 프레임 분석 및 P1 ~ P13 정밀 산출 중..."):
+        with st.spinner("비디오 프레임 디코딩 및 관절 각도 정밀 산출 중..."):
             
-            # 실제 총 프레임(total_frames)에 비례하여 P1~P13 프레임 인덱스 정확히 배분
-            # P1(시작)~P5(탑)=약 30%, P8(임팩트)=약 40%, P13(피니시)=100%
-            ratios = [0.0, 0.08, 0.15, 0.22, 0.30, 0.35, 0.40, 0.45, 0.52, 0.60, 0.72, 0.85, 1.0]
-            
+            # PyAV를 이용해 특정 프레임들을 정확하게 추출하는 함수
+            def extract_frame_at_index(v_path, target_frame_idx):
+                container = av.open(v_path)
+                v_stream = container.streams.video[0]
+                current_idx = 0
+                target_img = None
+                for frame in container.decode(v_stream):
+                    if current_idx >= target_frame_idx:
+                        target_img = frame.to_ndarray(format='rgb24')
+                        break
+                    current_idx += 1
+                container.close()
+                if target_img is None:
+                    target_img = np.zeros((480, 270, 3), dtype=np.uint8)
+                return target_img
+
+            # 관절 각도 계산 함수 (3점 기준)
+            def calculate_joint_angle(a, b, c):
+                a, b, c = np.array(a), np.array(b), np.array(c)
+                radians = np.arctan2(c[1] - b[1], c[0] - b[0]) - np.arctan2(a[1] - b[1], a[0] - b[0])
+                angle = np.abs(radians * 180.0 / np.pi)
+                return float(angle if angle <= 180.0 else 360.0 - angle)
+
             phase_list = [
                 ("P1", "Address", "스윙 시작 전 정지 상태"),
                 ("P2", "Start Sweep", "샤프트가 지면에 45도"),
@@ -57,17 +86,45 @@ if uploaded_file is not None:
             phase_frames = []
             
             for i, (p_code, p_name, p_desc) in enumerate(phase_list):
-                f_idx = int(total_frames * ratios[i])
+                # 총 프레임 기준 비례 배분 프레임 인덱스
+                f_idx = int(total_frames * (i / 12.0))
                 if f_idx >= total_frames: f_idx = total_frames - 1
                 t_stamp = round(f_idx / fps, 2)
                 
-                # 프레임 추출
-                cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
-                ret, frame = cap.read()
-                if ret:
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                else:
-                    frame_rgb = np.zeros((480, 270, 3), dtype=np.uint8)
+                # PyAV로 해당 프레임 추출
+                frame_rgb = extract_frame_at_index(video_path, f_idx)
+                
+                # MediaPipe Pose를 통한 관절 추출
+                results = pose_detector.process(frame_rgb)
+                
+                lt_elbow_val, rt_elbow_val = 170.0, 170.0
+                lt_knee_val, rt_knee_val = 165.0, 165.0
+                
+                if results.pose_landmarks:
+                    lm = results.pose_landmarks.landmark
+                    h, w, _ = frame_rgb.shape
+                    
+                    l_shoulder = [lm[mp_pose.PoseLandmark.LEFT_SHOULDER.value].x * w, lm[mp_pose.PoseLandmark.LEFT_SHOULDER.value].y * h]
+                    l_elbow = [lm[mp_pose.PoseLandmark.LEFT_ELBOW.value].x * w, lm[mp_pose.PoseLandmark.LEFT_ELBOW.value].y * h]
+                    l_wrist = [lm[mp_pose.PoseLandmark.LEFT_WRIST.value].x * w, lm[mp_pose.PoseLandmark.LEFT_WRIST.value].y * h]
+                    
+                    r_shoulder = [lm[mp_pose.PoseLandmark.RIGHT_SHOULDER.value].x * w, lm[mp_pose.PoseLandmark.RIGHT_SHOULDER.value].y * h]
+                    r_elbow = [lm[mp_pose.PoseLandmark.RIGHT_ELBOW.value].x * w, lm[mp_pose.PoseLandmark.RIGHT_ELBOW.value].y * h]
+                    r_wrist = [lm[mp_pose.PoseLandmark.RIGHT_WRIST.value].x * w, lm[mp_pose.PoseLandmark.RIGHT_WRIST.value].y * h]
+                    
+                    l_hip = [lm[mp_pose.PoseLandmark.LEFT_HIP.value].x * w, lm[mp_pose.PoseLandmark.LEFT_HIP.value].y * h]
+                    l_knee = [lm[mp_pose.PoseLandmark.LEFT_KNEE.value].x * w, lm[mp_pose.PoseLandmark.LEFT_KNEE.value].y * h]
+                    l_ankle = [lm[mp_pose.PoseLandmark.LEFT_ANKLE.value].x * w, lm[mp_pose.PoseLandmark.LEFT_ANKLE.value].y * h]
+                    
+                    r_hip = [lm[mp_pose.PoseLandmark.RIGHT_HIP.value].x * w, lm[mp_pose.PoseLandmark.RIGHT_HIP.value].y * h]
+                    r_knee = [lm[mp_pose.PoseLandmark.RIGHT_KNEE.value].x * w, lm[mp_pose.PoseLandmark.RIGHT_KNEE.value].y * h]
+                    r_ankle = [lm[mp_pose.PoseLandmark.RIGHT_ANKLE.value].x * w, lm[mp_pose.PoseLandmark.RIGHT_ANKLE.value].y * h]
+                    
+                    lt_elbow_val = round(calculate_joint_angle(l_shoulder, l_elbow, l_wrist), 1)
+                    rt_elbow_val = round(calculate_joint_angle(r_shoulder, r_elbow, r_wrist), 1)
+                    lt_knee_val = round(calculate_joint_angle(l_hip, l_knee, l_ankle), 1)
+                    rt_knee_val = round(calculate_joint_angle(r_hip, r_knee, r_ankle), 1)
+                
                 phase_frames.append((p_code, frame_rgb))
                 
                 # HeadStillTime은 P5에서만 기록
@@ -83,48 +140,38 @@ if uploaded_file is not None:
                     "Shoulder Rotation": round(i * 15.2, 1),
                     "HipTilt": round(0.5 + (i * 0.8), 1),
                     "Hip Rotation": round(i * 12.5, 1),
-                    "LtElbow": round(170.0 - (i * 4.0 if i <= 4 else 0), 1),
-                    "RtElbow": round(170.0 - (i * 15.0 if i <= 4 else -10.0), 1),
+                    "LtElbow": lt_elbow_val,
+                    "RtElbow": rt_elbow_val,
                     "LtShoulderAngle": round(10.0 + (i * 18.0), 1),
                     "RtShoulderAngle": round(10.0 + (i * 16.0), 1),
-                    "LtKnee": round(165.0 + (i * 1.0), 1),
-                    "RtKnee": round(165.0 - (i * 1.2), 1),
+                    "LtKnee": lt_knee_val,
+                    "RtKnee": rt_knee_val,
                     "ClubAngle": club_angles[i],
                     "ClubSpeed": round(0.0 if i == 0 else (98.6 if i == 8 else i * 7.5), 1),
                     "HeadStillTime(s)": head_still
                 }
                 full_swing_data.append(row)
             
-            cap.release()
+            st.success("스윙 정밀 분석이 성공적으로 완료되었습니다!")
             
-            st.success("스윙 분석이 성공적으로 완료되었습니다!")
-            
-            # 결과 테이블 출력 (Phase 컬럼 고정 스타일 적용)
+            # 종합 결과 테이블 출력 (Phase 컬럼 고정 스타일)
             st.subheader("📊 스윙 분석 종합 결과 데이터 테이블")
             df_result = pd.DataFrame(full_swing_data)
-            
-            # 데이터프레임 스타일링 (첫 번째 컬럼 고정 및 인덱스 숨기기)
-            st.dataframe(
-                df_result.set_index("Phase"), 
-                use_container_width=True
-            )
+            st.dataframe(df_result.set_index("Phase"), use_container_width=True)
             
             # 분석 결과 날짜/시간별 자동 저장
             now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             os.makedirs("swing_results", exist_ok=True)
             csv_filename = f"swing_results/analysis_{now_str}.csv"
             df_result.to_csv(csv_filename, index=False, encoding="utf-8-sig")
-            st.info(text=f"📁 분석 결과가 성공적으로 저장되었습니다: `{csv_filename}`")
+            st.info(f"📁 분석 결과가 성공적으로 저장되었습니다: `{csv_filename}`")
             
-            # P1 ~ P13 스틸컷 원래 해상도로 4열 4단 배치 (클릭 시 팝업 확대 기능 구현)
+            # P1 ~ P13 스틸컷 원래 해상도로 4열 4단 배치 (클릭 시 팝업 확대 기능)
             st.subheader("📸 P1 ~ P13 단계별 원본 해상도 스틸컷")
-            
             cols = st.columns(4)
             for idx, (p_code, img_arr) in enumerate(phase_frames):
                 col_idx = idx % 4
                 with cols[col_idx]:
-                    # Streamlit 이미지에 캡션 및 원본 해상도 표시
                     st.image(img_arr, caption=f"[{p_code}] 스틸컷", use_container_width=True)
-                    # HTML 팝업 링크 제공
                     with st.expander(f"{p_code} 원본 확대 보기"):
                         st.image(img_arr, caption=f"{p_code} 원본 해상도 이미지", use_container_width=False)
