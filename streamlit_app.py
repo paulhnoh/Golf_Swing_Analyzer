@@ -132,7 +132,6 @@ if uploaded_file is not None:
                 
             cap.release()
             
-            # Phase 추출 로직
             df_temp = pd.DataFrame(frame_data)
             valid = df_temp[df_temp['has_landmarks'] == True]
             
