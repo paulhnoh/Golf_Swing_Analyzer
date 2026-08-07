@@ -1,6 +1,6 @@
 streamlit
-imageio
-imageio-ffmpeg
+av
+mediapipe
 numpy
 pandas
 ultralytics
