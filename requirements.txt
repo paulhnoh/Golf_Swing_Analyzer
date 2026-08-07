@@ -1,4 +1,6 @@
 streamlit
-opencv-python-headless
+imageio
+imageio-ffmpeg
 numpy
 pandas
+ultralytics
