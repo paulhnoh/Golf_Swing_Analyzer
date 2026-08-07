@@ -1,6 +1,6 @@
 streamlit
 av
-mediapipe==0.10.14
+mediapipe
 numpy
 pandas
 ultralytics
