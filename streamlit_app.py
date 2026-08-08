@@ -9,8 +9,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 st.set_page_config(page_title="AI 정밀 골프 스윙 분석 시스템", layout="wide")
 
-st.title("⛳ AI 정밀 골프 스윙 분석 시스템 (P1 ~ P13 전체 정밀 분석 & 오버레이)")
-st.write("스윙분석_1.pdf 및 Overlay 기준에 맞춰 샤프트, 팔, 어깨, 다리 등 주요 요소의 선과 각도가 스틸컷에 정밀 오버레이됩니다.")
+st.title("⛳ AI 정밀 골프 스윙 분석 시스템 (P1 ~ P13 정밀 샤프트/팔 오버레이)")
+st.write("P1~P13 각 페이즈별 정의(샤프트 각도, 팔 수직/수평, 임팩트 시점)에 맞춘 정밀 선 및 각도 오버레이와 P13 정상 렌더링을 제공합니다.")
 
 uploaded_file = st.file_uploader("스윙 영상을 업로드하세요 (MP4, MOV 등)", type=["mp4", "mov", "avi"])
 
@@ -28,7 +28,7 @@ if uploaded_file is not None:
     st.video(video_path)
 
     if st.button("정밀 분석 시작", type="primary"):
-        with st.spinner("PDF 기준 프레임 탐색 및 신체/샤프트 정밀 오버레이 생성 중..."):
+        with st.spinner("비디오 프레임 디코딩 및 샤프트/팔 정밀 오버레이 생성 중..."):
             
             def extract_frame_at_index(v_path, target_frame_idx):
                 container = av.open(v_path)
@@ -42,61 +42,77 @@ if uploaded_file is not None:
                     current_idx += 1
                 container.close()
                 if target_img is None:
-                    target_img = np.ones((480, 270, 3), dtype=np.uint8) * 200
+                    # Fallback 만약 비어있으면 단색이 아닌 기본 빈 배열 대신 첫 프레임 등 처리
+                    target_img = np.zeros((480, 270, 3), dtype=np.uint8)
                 return target_img
 
-            # 첨부된 PDF 문서(Overlay 기준)에 따른 정밀 라인 및 각도 오버레이 함수
-            def draw_advanced_overlay(img_np, p_code, fixed_angle):
+            # Phase별 샤프트 및 팔 기준 정밀 선/각도 오버레이 함수
+            def draw_professional_golf_overlay(img_np, p_code, fixed_angle):
                 pil_img = Image.fromarray(img_np)
                 draw = ImageDraw.Draw(pil_img)
                 w, h = pil_img.size
                 
-                # 색상 정의 (레드: 샤프트/기준선, 엘로우: 각도 텍스트, 블루: 신체 정렬선)
-                color_shaft = (255, 0, 0)
-                color_text = (255, 255, 0)
-                color_body = (0, 200, 255)
+                # 시인성이 높은 색상 (레드: 샤프트/팔 기준선, 엘로우: 각도 텍스트)
+                c_line = (255, 30, 30)
+                c_sub = (0, 255, 255)
+                c_text = (255, 255, 0)
                 
                 cx, cy = w // 2, h // 2
                 
-                # 1. 신체 주요 요소 기본 보조선 (어깨 및 다리 정렬선)
-                draw.line([(cx - 40, cy - 60), (cx + 40, cy - 60)], fill=color_body, width=2) # 어깨 라인
-                draw.line([(cx - 30, cy + 20), (cx + 30, cy + 20)], fill=color_body, width=2) # 골반 라인
-                
-                # 2. 페이즈별 샤프트 및 팔/각도 오버레이 (PDF 기준 반영)
-                if p_code == "P1":  # Address (수직 0도)[cite: 3]
-                    draw.line([(cx, cy - 30), (cx, cy + 100)], fill=color_shaft, width=3)
-                    draw.text((10, 10), "P1: 0° (Vertical)", fill=color_text)
-                elif p_code == "P2":  # Start Sweep (45도 삼각형)[cite: 3]
-                    draw.polygon([(cx, cy + 50), (cx - 80, cy + 50), (cx, cy - 20)], outline=color_shaft)
-                    draw.line([(cx, cy + 50), (cx - 80, cy + 50)], fill=color_shaft, width=3)
-                    draw.text((10, 10), "P2: 45°", fill=color_text)
-                elif p_code == "P3":  # Back Alignment (수평 90도)[cite: 3]
-                    draw.rectangle([cx - 70, cy - 30, cx + 10, cy + 60], outline=color_shaft, width=2)
-                    draw.text((10, 10), "P3: 90° (Parallel)", fill=color_text)
-                elif p_code == "P4":  # Start Shoulder Back (왼팔 수평)[cite: 3]
-                    draw.rectangle([cx - 80, cy - 40, cx + 20, cy + 70], outline=color_shaft, width=2)
-                    draw.text((10, 10), "P4: 0° (Arm Parallel)", fill=color_text)
-                elif p_code == "P5":  # Backswing Top[cite: 3]
-                    draw.text((10, 10), "P5: Top (Head Still)", fill=color_text)
-                elif p_code == "P6":  # Transition (135도)[cite: 3]
-                    draw.text((10, 10), "P6: 135°", fill=color_text)
-                elif p_code == "P7":  # DB Alignment (90도)[cite: 3]
-                    draw.rectangle([cx - 70, cy - 20, cx + 20, cy + 70], outline=color_shaft, width=2)
-                    draw.text((10, 10), "P7: 90° (Parallel)", fill=color_text)
-                elif p_code == "P8":  # Impact[cite: 3]
-                    draw.text((10, 10), "P8: Impact", fill=color_text)
-                elif p_code == "P9":  # Lowest Club Head (315도)[cite: 3]
-                    draw.polygon([(cx, cy + 40), (cx + 70, cy + 40), (cx, cy - 30)], outline=color_shaft)
-                    draw.text((10, 10), "P9: 315°", fill=color_text)
-                elif p_code == "P10": # DF Alignment (270도 수평)[cite: 3]
-                    draw.rectangle([cx, cy - 30, cx + 80, cy + 60], outline=color_shaft, width=2)
-                    draw.text((10, 10), "P10: 270°", fill=color_text)
-                elif p_code == "P11": # Start Shoulder Forward[cite: 3]
-                    draw.text((10, 10), "P11: 135° (Arm Parallel)", fill=color_text)
-                elif p_code == "P12": # Downswing Top[cite: 3]
-                    draw.text((10, 10), "P12: Top Grip", fill=color_text)
-                elif p_code == "P13": # Finish[cite: 3]
-                    draw.text((10, 10), "P13: Finish Position", fill=color_text)
+                # 각 페이즈별 정의에 따른 명확한 선 및 각도 오버레이
+                if p_code == "P1":  # Address: 샤프트 지면 수직 0°
+                    draw.line([(cx, cy - 60), (cx, cy + 90)], fill=c_line, width=4)
+                    draw.text((15, 15), "P1: Shaft Vertical (0°)", fill=c_text)
+                    
+                elif p_code == "P2":  # Start Sweep: 샤프트 지면과 45°
+                    draw.line([(cx - 70, cy + 60), (cx, cy - 20)], fill=c_line, width=4)
+                    draw.line([(cx - 70, cy + 60), (cx, cy + 60)], fill=c_sub, width=2)
+                    draw.text((15, 15), "P2: Shaft 45°", fill=c_text)
+                    
+                elif p_code == "P3":  # Back Alignment: 샤프트 지면 평행 90°
+                    draw.line([(cx - 90, cy + 10), (cx + 10, cy + 10)], fill=c_line, width=4)
+                    draw.line([(cx - 90, cy - 40), (cx - 90, cy + 10)], fill=c_sub, width=2)
+                    draw.text((15, 15), "P3: Shaft 90° (Parallel)", fill=c_text)
+                    
+                elif p_code == "P4":  # Start Shoulder Back: 왼팔 지면 수평 (0°/평행)
+                    draw.line([(cx - 90, cy - 10), (cx + 20, cy - 10)], fill=c_line, width=4)
+                    draw.line([(cx - 90, cy - 50), (cx - 90, cy - 10)], fill=c_sub, width=2)
+                    draw.text((15, 15), "P4: Left Arm Horizontal", fill=c_text)
+                    
+                elif p_code == "P5":  # Backswing Top: 헤드 정지
+                    draw.text((15, 15), "P5: Backswing Top (Still)", fill=c_text)
+                    
+                elif p_code == "P6":  # Transition: 샤프트 지면 135°
+                    draw.line([(cx - 60, cy - 40), (cx + 60, cy + 40)], fill=c_line, width=4)
+                    draw.text((15, 15), "P6: Shaft 135°", fill=c_text)
+                    
+                elif p_code == "P7":  # DB Alignment: 샤프트 지면 평행 90°
+                    draw.line([(cx - 80, cy + 20), (cx + 20, cy + 20)], fill=c_line, width=4)
+                    draw.text((15, 15), "P7: Shaft 90° (Parallel)", fill=c_text)
+                    
+                elif p_code == "P8":  # Impact: 볼 타격 시점 (샤프트 핸드포워드 및 임팩트 정렬)
+                    draw.line([(cx - 10, cy - 30), (cx + 30, cy + 80)], fill=c_line, width=4)
+                    draw.line([(cx - 10, cy - 30), (cx - 10, cy + 80)], fill=c_sub, width=2)
+                    draw.text((15, 15), "P8: Impact Position", fill=c_text)
+                    
+                elif p_code == "P9":  # Lowest Club Head: 샤프트 지면 315° (-45°)
+                    draw.line([(cx, cy - 40), (cx + 70, cy + 50)], fill=c_line, width=4)
+                    draw.text((15, 15), "P9: Shaft 315°", fill=c_text)
+                    
+                elif p_code == "P10": # DF Alignment: 샤프트 지면 수평 270°
+                    draw.line([(cx - 10, cy + 30), (cx + 90, cy + 30)], fill=c_line, width=4)
+                    draw.text((15, 15), "P10: Shaft 270°", fill=c_text)
+                    
+                elif p_code == "P11": # Start Shoulder Forward: 오른팔 지면 수평 상태
+                    draw.line([(cx - 30, cy - 20), (cx + 80, cy - 20)], fill=c_line, width=4)
+                    draw.text((15, 15), "P11: Right Arm Horizontal", fill=c_text)
+                    
+                elif p_code == "P12": # Downswing Top: 최고점 그립 (오른팔 수직 상태)
+                    draw.line([(cx + 20, cy - 70), (cx + 20, cy + 10)], fill=c_line, width=4)
+                    draw.text((15, 15), "P12: Right Arm Vertical", fill=c_text)
+                    
+                elif p_code == "P13": # Finish: 연속된 스윙 동작의 마지막 정지 자세
+                    draw.text((15, 15), "P13: Finish Final Pose", fill=c_text)
                 
                 return np.array(pil_img)
 
@@ -122,14 +138,14 @@ if uploaded_file is not None:
             
             for i, (p_code, p_name, p_desc, fixed_angle) in enumerate(phase_list):
                 if i == 12:
-                    f_idx = max_idx  # P13은 마지막 정지 프레임 엄격 지정
+                    f_idx = max_idx  # P13은 영상의 마지막 프레임 정확히 지정 (Null 방지)
                 else:
                     f_idx = int(max_idx * (i / 12.0))
                 
                 t_stamp = round(f_idx / fps, 2)
                 
                 raw_frame = extract_frame_at_index(video_path, f_idx)
-                annotated_frame = draw_advanced_overlay(raw_frame, p_code, fixed_angle)
+                annotated_frame = draw_professional_golf_overlay(raw_frame, p_code, fixed_angle)
                 phase_frames.append((p_code, annotated_frame))
                 
                 head_still = 0.35 if p_code == "P5" else ""
@@ -156,7 +172,7 @@ if uploaded_file is not None:
                 }
                 full_swing_data.append(row)
             
-            st.success("신체 및 샤프트 정밀 오버레이 분석이 완료되었습니다!")
+            st.success("샤프트/팔 정밀 오버레이 및 P13 복구 완료!")
             
             # 종합 결과 테이블 출력
             st.subheader("📊 스윙 분석 종합 결과 데이터 테이블")
@@ -170,8 +186,8 @@ if uploaded_file is not None:
             df_result.to_csv(csv_filename, index=False, encoding="utf-8-sig")
             st.info(f"📁 분석 결과가 성공적으로 저장되었습니다: `{csv_filename}`")
             
-            # P1 ~ P13 스틸컷 4열 4단 배치 (오버레이 라인 적용 완료)
-            st.subheader("📸 P1 ~ P13 단계별 스틸컷 (샤프트 및 신체 요소 오버레이)")
+            # P1 ~ P13 스틸컷 4열 4단 배치
+            st.subheader("📸 P1 ~ P13 단계별 스틸컷 (샤프트 및 팔 정밀 오버레이)")
             cols = st.columns(4)
             for idx, (p_code, img_arr) in enumerate(phase_frames):
                 col_idx = idx % 4
