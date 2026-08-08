@@ -10,15 +10,10 @@ import av
 from PIL import Image, ImageDraw, ImageFont
 import mediapipe as mp
 
-try:
-    from ultralytics import YOLO
-except ImportError:
-    pass
-
 st.set_page_config(page_title="AI 정밀 골프 스윙 분석 시스템", layout="wide")
 
-st.title("⛳ AI 정밀 골프 스윙 분석 시스템 (Pro-Zoom & 골든 비율 탑재)")
-st.write("전문가가 직접 교정한 스윙의 '골든 비율(Golden Ratio)'을 AI 초깃값에 이식하였으며, 돋보기(Zoom) 모드를 통해 픽셀 단위의 미세 조정이 가능합니다.")
+st.title("⛳ AI 정밀 골프 스윙 분석 시스템 (전수 프레임 스캔 엔진)")
+st.write("단순 비율 추정을 완전히 폐기했습니다. 영상의 모든 프레임을 스캔하여 샤프트 각도와 관절의 수평/수직 조건을 정확히 충족하는 프레임만을 족집게처럼 찾아냅니다.")
 
 uploaded_file = st.file_uploader("스윙 영상을 업로드하세요 (MP4, MOV 등)", type=["mp4", "mov", "avi"])
 
@@ -29,12 +24,12 @@ if uploaded_file is not None:
     tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
     tfile.write(uploaded_file.read())
     video_path = tfile.name
-
     st.video(video_path)
 
-    if st.button("AI 정밀 분석 시작 (골든 비율 적용)", type="primary"):
-        with st.spinner("프레임 추출 및 앵커 동기화를 진행 중입니다... (약 1~2분 소요)"):
+    if st.button("전수 프레임 정밀 분석 시작 (시간 소요됨)", type="primary"):
+        with st.spinner("AI가 모든 프레임의 관절 좌표와 샤프트 각도를 1장씩 계산 중입니다... (약 1~2분 소요)"):
             
+            # 1. 무손실 프레임 추출
             container = av.open(video_path)
             stream = container.streams.video[0]
             fps = float(stream.average_rate) if stream.average_rate else 30.0
@@ -48,69 +43,125 @@ if uploaded_file is not None:
             st.session_state.raw_frames = frames_bgr
             st.session_state.fps = fps
             
+            # 2. MediaPipe 초기화 및 데이터 저장소
             mp_pose = mp.solutions.pose
             pose = mp_pose.Pose(static_image_mode=False, model_complexity=1, min_detection_confidence=0.5)
             
             landmarks_data = []
-            wrist_ys = []
+            wrist_ys, wrist_xs = [], []
+            ls_ys, lw_ys, rs_ys, rw_ys = [], [], [], []
+            re_xs, rw_xs = [], []
+            shaft_angles = []
             
-            for frame in frames_bgr:
+            # --- 3. 0부터 끝까지 모든 프레임 전수 분석 (핵심 로직) ---
+            for i, frame in enumerate(frames_bgr):
                 img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 res = pose.process(img_rgb)
+                h, w, _ = frame.shape
+                
                 if res.pose_landmarks:
-                    landmarks_data.append(res.pose_landmarks.landmark)
-                    wy = (res.pose_landmarks.landmark[mp_pose.PoseLandmark.LEFT_WRIST].y + 
-                          res.pose_landmarks.landmark[mp_pose.PoseLandmark.RIGHT_WRIST].y) / 2
-                    wrist_ys.append(wy)
+                    lm = res.pose_landmarks.landmark
+                    landmarks_data.append(lm)
+                    
+                    # 관절 좌표 픽셀 변환
+                    lw_x, lw_y = lm[mp_pose.PoseLandmark.LEFT_WRIST].x * w, lm[mp_pose.PoseLandmark.LEFT_WRIST].y * h
+                    rw_x, rw_y = lm[mp_pose.PoseLandmark.RIGHT_WRIST].x * w, lm[mp_pose.PoseLandmark.RIGHT_WRIST].y * h
+                    ls_x, ls_y = lm[mp_pose.PoseLandmark.LEFT_SHOULDER].x * w, lm[mp_pose.PoseLandmark.LEFT_SHOULDER].y * h
+                    rs_x, rs_y = lm[mp_pose.PoseLandmark.RIGHT_SHOULDER].x * w, lm[mp_pose.PoseLandmark.RIGHT_SHOULDER].y * h
+                    re_x = lm[mp_pose.PoseLandmark.RIGHT_ELBOW].x * w
+                    
+                    hx, hy = (lw_x + rw_x) / 2, (lw_y + rw_y) / 2
+                    
+                    wrist_ys.append(hy)
+                    wrist_xs.append(hx)
+                    lw_ys.append(lw_y); ls_ys.append(ls_y)
+                    rw_ys.append(rw_y); rs_ys.append(rs_y)
+                    re_xs.append(re_x); rw_xs.append(rw_x)
+                    
+                    # [OpenCV 샤프트 각도 추적] 손목 주변의 직선을 찾아 각도 계산
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+                    edges = cv2.Canny(blurred, 50, 150)
+                    # 손목 주변만 마스킹 (속도 및 정확도 향상)
+                    mask = np.zeros_like(edges)
+                    cv2.circle(mask, (int(hx), int(hy)), 150, 255, -1)
+                    edges_masked = cv2.bitwise_and(edges, mask)
+                    
+                    lines = cv2.HoughLinesP(edges_masked, 1, np.pi/180, threshold=30, minLineLength=40, maxLineGap=10)
+                    
+                    best_angle = None
+                    min_dist = float('inf')
+                    
+                    if lines is not None:
+                        for line in lines:
+                            x1, y1, x2, y2 = line[0]
+                            # 손목과 직선 사이의 거리 계산
+                            dist = min(math.hypot(x1 - hx, y1 - hy), math.hypot(x2 - hx, y2 - hy))
+                            if dist < 50: # 손목에 붙어있는 선만 샤프트로 인정
+                                # 수직 하단을 0도로 하는 360도 각도 체계
+                                vec_x, vec_y = (x1 - x2, y1 - y2) if y1 < y2 else (x2 - x1, y2 - y1)
+                                angle = math.degrees(math.atan2(-vec_x, vec_y)) % 360
+                                if dist < min_dist:
+                                    min_dist = dist
+                                    best_angle = angle
+                    shaft_angles.append(best_angle)
                 else:
                     landmarks_data.append(None)
-                    wrist_ys.append(np.nan)
-                    
-            st.session_state.lm_data = landmarks_data
-            w_y_smooth = pd.Series(wrist_ys).interpolate().values
-
-            # --- 앵커 고정 (P1, P5, P8) ---
-            f_p5 = int(np.nanargmin(w_y_smooth))
-            f_p1 = int(np.nanargmax(w_y_smooth[:f_p5])) if f_p5 > 0 else 0
+                    for arr in [wrist_ys, wrist_xs, lw_ys, ls_ys, rw_ys, rs_ys, re_xs, rw_xs, shaft_angles]:
+                        arr.append(np.nan)
             
-            f_p8 = f_p5 + 10
-            try:
-                model = YOLO('yolov8n.pt')
-                results = model(cv2.cvtColor(frames_bgr[f_p1], cv2.COLOR_BGR2RGB), classes=[32], verbose=False)
-                if len(results) > 0 and len(results[0].boxes) > 0:
-                    box = results[0].boxes[0].xyxy[0].cpu().numpy()
-                    x1, y1, x2, y2 = [int(v) for v in box]
-                    h_img, w_img, _ = frames_bgr[0].shape
-                    x1, y1 = max(0, x1-15), max(0, y1-15)
-                    x2, y2 = min(w_img, x2+15), min(h_img, y2+15)
-                    
-                    base_roi = cv2.cvtColor(frames_bgr[f_p1][y1:y2, x1:x2], cv2.COLOR_BGR2GRAY)
-                    diffs = []
-                    search_range = min(total_frames, f_p5 + int(fps * 1.5))
-                    for i in range(f_p5, search_range):
-                        roi = cv2.cvtColor(frames_bgr[i][y1:y2, x1:x2], cv2.COLOR_BGR2GRAY)
-                        diffs.append(np.sum(cv2.absdiff(base_roi, roi)))
-                    if diffs: f_p8 = f_p5 + np.argmax(diffs)
-                else:
-                    f_p8 = f_p5 + int(np.nanargmax(w_y_smooth[f_p5:min(total_frames, f_p5 + int(fps))]))
-            except:
-                f_p8 = f_p5 + int(np.nanargmax(w_y_smooth[f_p5:min(total_frames, f_p5 + int(fps))]))
+            st.session_state.lm_data = landmarks_data
+            
+            # --- 4. 데이터 보간 (모션 블러 극복) ---
+            # 샤프트가 블러 처리되어 None인 프레임도 앞뒤 프레임을 통해 각도를 유추해냅니다.
+            sin_a = pd.Series([math.sin(math.radians(a)) if not np.isnan(a) else np.nan for a in shaft_angles]).interpolate(limit_direction='both').values
+            cos_a = pd.Series([math.cos(math.radians(a)) if not np.isnan(a) else np.nan for a in shaft_angles]).interpolate(limit_direction='both').values
+            shaft_smooth = [(math.degrees(math.atan2(s, c)) % 360) for s, c in zip(sin_a, cos_a)]
+            
+            w_y_smooth = pd.Series(wrist_ys).interpolate().rolling(5, center=True, min_periods=1).mean().values
 
+            # --- 5. 1프레임 단위 조건부 검색 알고리즘 (핵심) ---
+            # 조건 1. 앵커 고정 (P5, P8, P1)
+            f_p5 = int(np.nanargmin(w_y_smooth)) # 양손 Y 최소 (최고점)
+            search_end = min(total_frames, f_p5 + int(fps * 1.5))
+            f_p8 = f_p5 + int(np.nanargmax(w_y_smooth[f_p5:search_end])) # 양손 Y 최대 (임팩트 최하점)
+            f_p1 = int(np.nanargmax(w_y_smooth[:f_p5])) if f_p5 > 0 else 0
             f_p13 = min(total_frames - 1, f_p8 + int(fps * 1.0))
 
-            # --- 전문가 교정 데이터 기반 비선형 골든 비율 이식 ---
-            f_p2 = f_p1 + int((f_p5 - f_p1) * 0.42)
-            f_p3 = f_p1 + int((f_p5 - f_p1) * 0.48)
-            f_p4 = f_p1 + int((f_p5 - f_p1) * 0.61)
-            
-            f_p6 = f_p5 + int((f_p8 - f_p5) * 0.70)
-            f_p7 = f_p5 + int((f_p8 - f_p5) * 0.84)
-            
-            f_p9 = f_p8 + int((f_p13 - f_p8) * 0.05)
-            f_p10 = f_p8 + int((f_p13 - f_p8) * 0.09)
-            f_p11 = f_p8 + int((f_p13 - f_p8) * 0.17)
-            f_p12 = f_p8 + int((f_p13 - f_p8) * 0.37)
+            # 조건 탐색 유틸리티 함수
+            def find_closest_angle(start, end, target_angle, angles_list):
+                if start >= end: return start
+                sub_angles = angles_list[start:end]
+                diffs = [min(abs(a - target_angle), 360 - abs(a - target_angle)) for a in sub_angles]
+                return start + np.argmin(diffs)
 
+            def find_closest_diff(start, end, arr1, arr2):
+                if start >= end: return start
+                diffs = np.abs(np.array(arr1[start:end]) - np.array(arr2[start:end]))
+                return start + np.nanargmin(diffs)
+
+            # [P4] 왼팔 수평: 어깨Y와 손목Y의 차이가 최소가 되는 지점 (0도)
+            f_p4 = find_closest_diff(f_p1, f_p5, lw_ys, ls_ys)
+            
+            # [P2, P3] 백스윙 샤프트 각도 추적
+            f_p2 = find_closest_angle(f_p1, f_p5, 45, shaft_smooth)
+            f_p3 = find_closest_angle(f_p1, f_p5, 90, shaft_smooth)
+            
+            # [P6, P7] 다운스윙 샤프트 각도 추적
+            f_p6 = find_closest_angle(f_p5, f_p8, 135, shaft_smooth)
+            f_p7 = find_closest_angle(f_p5, f_p8, 90, shaft_smooth)
+            
+            # [P9, P10] 팔로우스루 샤프트 각도 추적
+            f_p9 = find_closest_angle(f_p8, f_p13, 315, shaft_smooth)
+            f_p10 = find_closest_angle(f_p8, f_p13, 270, shaft_smooth)
+            
+            # [P11] 오른팔 수평: 오른 어깨Y와 오른 손목Y 차이가 최소
+            f_p11 = find_closest_diff(f_p8, f_p13, rw_ys, rs_ys)
+            
+            # [P12] 오른팔 수직: 오른 팔꿈치X와 오른 손목X 차이가 최소
+            f_p12 = find_closest_diff(f_p11, f_p13, re_xs, rw_xs)
+
+            # 탐색된 프레임 인덱스 할당
             ai_indices = [f_p1, f_p2, f_p3, f_p4, f_p5, f_p6, f_p7, f_p8, f_p9, f_p10, f_p11, f_p12, f_p13]
             ai_indices = [int(max(0, min(total_frames - 1, idx))) for idx in ai_indices]
             
@@ -119,19 +170,15 @@ if uploaded_file is not None:
             st.session_state.user_frames = {phase_keys[i]: ai_indices[i] for i in range(13)}
             st.session_state.analyzed = True
 
-# --- 반응형 렌더링 및 Zoom 미세 조정 ---
+# --- 렌더링 및 수동 미세 조정 섹션 ---
 if st.session_state.get('analyzed'):
-    st.success("✅ 골든 비율 기반 1차 세팅이 완료되었습니다. 테이블 수치는 1프레임 조작 시 즉각 반응합니다.")
+    st.success("✅ 전수 프레임 스캔 완료! AI가 실제 관절 각도와 샤프트 궤적을 계산하여 최적의 프레임을 찾아냈습니다.")
     
     table_placeholder = st.empty()
     csv_placeholder = st.empty()
     
-    st.subheader("📸 단계별 프레임 미세 조정 및 줌(Zoom) 뷰")
-    
-    # [핵심 기능] 돋보기 모드 토글
-    zoom_mode = st.toggle("🔍 2배 확대(Zoom) 모드 켜기 (손목 및 샤프트 중심)", value=False)
-    if zoom_mode:
-        st.info("🔎 확대 모드가 켜졌습니다. 오버레이 라인이 클럽 샤프트 및 관절과 픽셀 단위로 일치하는지 확인하며 슬라이더를 조정하세요.")
+    st.subheader("📸 단계별 프레임 확인 및 미세 조정")
+    zoom_mode = st.toggle("🔍 2배 확대(Zoom) 모드 켜기", value=False)
     
     frames_bgr = st.session_state.raw_frames
     landmarks_data = st.session_state.lm_data
@@ -173,15 +220,11 @@ if st.session_state.get('analyzed'):
             p_code, p_name, p_desc, fixed_angle = phase_defs[idx]
             
             with cols[i]:
-                current_f = st.slider(f"[{p_code}] 프레임 조정", 
-                                      0, total_frames - 1, 
-                                      st.session_state.user_frames[p_code], 
-                                      key=f"slider_{p_code}")
+                current_f = st.slider(f"[{p_code}] 프레임 조정", 0, total_frames - 1, st.session_state.user_frames[p_code], key=f"slider_{p_code}")
                 st.session_state.user_frames[p_code] = current_f
                 
                 raw_img = frames_bgr[current_f]
                 img_rgb = cv2.cvtColor(raw_img, cv2.COLOR_BGR2RGB)
-                
                 pil_img = Image.fromarray(img_rgb)
                 draw = ImageDraw.Draw(pil_img)
                 lm = landmarks_data[current_f]
@@ -190,7 +233,7 @@ if st.session_state.get('analyzed'):
                 except: font = ImageFont.load_default()
                 
                 c_line, c_sub, c_text = (255, 30, 30), (0, 255, 255), (255, 255, 0)
-                line_w, length = 8, 350
+                line_w, length = 8, max(w, h) // 3
                 
                 if lm:
                     lw_x, lw_y = lm[mp_pose.PoseLandmark.LEFT_WRIST].x * w, lm[mp_pose.PoseLandmark.LEFT_WRIST].y * h
@@ -204,47 +247,48 @@ if st.session_state.get('analyzed'):
 
                 def draw_shaft(text, rad_deg):
                     rad = math.radians(rad_deg)
-                    ex, ey = hx + length * math.sin(rad), hy + length * math.cos(rad)
+                    ex, ey = hx - math.sin(rad) * length, hy + math.cos(rad) * length
                     draw.line([(hx, hy), (ex, ey)], fill=c_line, width=line_w)
                     draw.text((ex + 10, ey - 20), text, font=font, fill=c_text)
                     return ex, ey
                     
                 if p_code == "P1": draw_shaft("0°", 0)
                 elif p_code == "P2": 
-                    ex, ey = draw_shaft("45°", 135)
-                    draw.line([(hx, hy), (hx, ey), (ex, ey)], fill=c_sub, width=5)
-                elif p_code == "P3": draw_shaft("90°", 90)
+                    ex, ey = draw_shaft("45°", 45)
+                    draw.line([(hx, hy), (hx, ey), (ex, ey)], fill=c_sub, width=4)
+                elif p_code == "P3": 
+                    ex, ey = draw_shaft("90°", 90)
+                    draw.line([(hx, hy), (hx, hy + 200)], fill=c_sub, width=4)
                 elif p_code == "P4":
                     draw.line([(ls_x, ls_y), (lw_x, lw_y)], fill=c_line, width=line_w)
-                    draw.line([(ls_x, ls_y), (ls_x, ls_y + 150)], fill=c_sub, width=5)
+                    draw.line([(ls_x, ls_y), (ls_x, ls_y + 150)], fill=c_sub, width=4)
                     draw.text((lw_x, lw_y - 50), "Left Arm Parallel", font=font, fill=c_text)
                 elif p_code == "P5": draw.text((hx - 80, hy - 120), "Top", font=font, fill=c_text)
-                elif p_code == "P6": draw_shaft("135°", 45)
+                elif p_code == "P6": draw_shaft("135°", 135)
                 elif p_code == "P7": draw_shaft("90°", 90)
                 elif p_code == "P8":
                     draw.line([(ls_x, ls_y), (lw_x, lw_y)], fill=c_line, width=line_w)
                     draw.line([(lw_x, lw_y), (lw_x, lw_y + length)], fill=c_line, width=line_w)
                     draw.text((lw_x + 40, lw_y + 80), "Impact", font=font, fill=c_text)
                 elif p_code == "P9": 
-                    ex, ey = draw_shaft("315°", -135)
-                    draw.line([(hx, hy), (hx, ey), (ex, ey)], fill=c_sub, width=5)
-                elif p_code == "P10": draw_shaft("270°", -90)
+                    ex, ey = draw_shaft("315° (-45°)", 315)
+                    draw.line([(hx, hy), (hx, ey), (ex, ey)], fill=c_sub, width=4)
+                elif p_code == "P10": 
+                    ex, ey = draw_shaft("270°", 270)
+                    draw.line([(hx, hy), (hx, hy + 200)], fill=c_sub, width=4)
                 elif p_code == "P11":
                     draw.line([(rs_x, rs_y), (rw_x, rw_y)], fill=c_line, width=line_w)
-                    draw.line([(rs_x, rs_y), (rs_x, rs_y + 150)], fill=c_sub, width=5)
+                    draw.line([(rs_x, rs_y), (rs_x, rs_y + 150)], fill=c_sub, width=4)
                     draw.text((rw_x - 150, rw_y - 50), "Right Arm Parallel", font=font, fill=c_text)
                 elif p_code == "P12":
                     draw.line([(re_x, re_y), (rw_x, rw_y)], fill=c_line, width=line_w)
                     draw.text((rw_x + 40, rw_y - 20), "Right Arm Vertical", font=font, fill=c_text)
                 elif p_code == "P13": draw.text((hx - 80, hy - 120), "Finish", font=font, fill=c_text)
                 
-                # [새로운 기능] Zoom 모드 크롭(Crop) 로직
                 if zoom_mode and lm:
-                    crop_size = int(min(w, h) * 0.5) # 화면의 50% 영역만 잘라내어 2배 확대 효과
-                    left = max(0, int(hx - crop_size / 2))
-                    top = max(0, int(hy - crop_size / 2))
-                    right = min(w, int(hx + crop_size / 2))
-                    bottom = min(h, int(hy + crop_size / 2))
+                    crop_size = int(min(w, h) * 0.6)
+                    left, top = max(0, int(hx - crop_size / 2)), max(0, int(hy - crop_size / 2))
+                    right, bottom = min(w, int(hx + crop_size / 2)), min(h, int(hy + crop_size / 2))
                     pil_img = pil_img.crop((left, top, right, bottom))
                 
                 st.image(np.array(pil_img), caption=f"[{p_code}] Frame: {current_f} / {total_frames-1}", use_container_width=True)
@@ -265,6 +309,5 @@ if st.session_state.get('analyzed'):
 
     df_result = pd.DataFrame(full_swing_data)
     table_placeholder.dataframe(df_result.set_index("Phase"), use_container_width=True)
-    
     csv = df_result.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
-    csv_placeholder.download_button("💾 현재 설정된 프레임 데이터 CSV 다운로드", data=csv, file_name='golden_ratio_swing_analysis.csv', mime='text/csv', type='primary')
+    csv_placeholder.download_button("💾 현재 설정된 프레임 데이터 CSV 다운로드", data=csv, file_name='full_scan_swing.csv', mime='text/csv', type='primary')
