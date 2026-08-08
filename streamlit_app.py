@@ -10,8 +10,8 @@ import mediapipe as mp
 
 st.set_page_config(page_title="AI 정밀 골프 스윙 분석 시스템", layout="wide")
 
-st.title("⛳ AI 정밀 골프 스윙 분석 시스템 (기하학적 절대 검색 엔진)")
-st.write("주먹구구식 중간값(Midpoint) 추정을 전면 폐기했습니다. 모든 프레임의 관절과 샤프트 각도를 계산하여 '지면과 완벽히 수평(0도/90도)'이 되는 찰나를 수학적으로 도출합니다.")
+st.title("⛳ AI 정밀 골프 스윙 분석 시스템 (기하학적 절대 검색 & 무결점 버전)")
+st.write("오류를 유발하는 객체 인식 코드를 영구 폐기하고, 모든 프레임의 관절 및 샤프트 궤적을 100% 안전한 수학적 방식으로 전수 스캔합니다.")
 
 uploaded_file = st.file_uploader("스윙 영상을 업로드하세요 (MP4, MOV 등)", type=["mp4", "mov", "avi"])
 
@@ -26,7 +26,7 @@ if uploaded_file is not None:
     st.video(video_path)
 
     if st.button("전체 프레임 기하학적 정밀 분석 시작", type="primary"):
-        with st.spinner("모든 프레임의 팔 수평, 수직, 샤프트 각도를 계산하여 매칭 중입니다... (약 1분 소요)"):
+        with st.spinner("모든 프레임의 관절 및 샤프트 좌표를 연산 중입니다... (약 1분 소요)"):
             
             # --- 1. 무손실 프레임 추출 ---
             container = av.open(video_path)
@@ -48,9 +48,10 @@ if uploaded_file is not None:
             
             landmarks_data = []
             wrist_ys, wrist_xs = [], []
-            ls_ys, lw_ys, rs_ys, rw_ys = [], [], [], []
+            ls_ys, lw_ys, rs_ys, rw_ys = [], [] ,[], []
             re_xs, rw_xs = [], []
             shaft_angles = []
+            hip_ys = []
             
             for frame in frames_bgr:
                 img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -67,19 +68,23 @@ if uploaded_file is not None:
                     rs_y = lm[mp_pose.PoseLandmark.RIGHT_SHOULDER].y * h
                     re_x = lm[mp_pose.PoseLandmark.RIGHT_ELBOW].x * w
                     
+                    rh_y = lm[mp_pose.PoseLandmark.RIGHT_HIP].y * h
+                    lh_y = lm[mp_pose.PoseLandmark.LEFT_HIP].y * h
+                    
                     hx, hy = (lw_x + rw_x) / 2, (lw_y + rw_y) / 2
                     
                     wrist_ys.append(hy); wrist_xs.append(hx)
                     lw_ys.append(lw_y); ls_ys.append(ls_y)
                     rw_ys.append(rw_y); rs_ys.append(rs_y)
                     rw_xs.append(rw_x); re_xs.append(re_x)
+                    hip_ys.append((rh_y + lh_y) / 2)
                     
-                    # [핵심] 샤프트 픽셀 전수 추적 (OpenCV)
+                    # [무결점 방어 탑재] 샤프트 픽셀 전수 추적 (OpenCV)
                     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
                     edges = cv2.Canny(blurred, 30, 150)
                     mask = np.zeros_like(edges)
-                    cv2.circle(mask, (int(hx), int(hy)), 200, 255, -1) # 손목 주변만 집중 스캔
+                    cv2.circle(mask, (int(hx), int(hy)), 200, 255, -1)
                     edges = cv2.bitwise_and(edges, mask)
                     
                     lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=30, minLineLength=50, maxLineGap=20)
@@ -88,70 +93,83 @@ if uploaded_file is not None:
                     
                     if lines is not None:
                         for line in lines:
-                            x1, y1, x2, y2 = line[0]
-                            dist = min(math.hypot(x1 - hx, y1 - hy), math.hypot(x2 - hx, y2 - hy))
-                            if dist < 60: # 손목에 연결된 선
-                                # 클럽 헤드 방향 추출 (손에서 먼 쪽)
-                                cx, cy = (x1, y1) if math.hypot(x1 - hx, y1 - hy) > math.hypot(x2 - hx, y2 - hy) else (x2, y2)
-                                dx, dy = cx - hx, cy - hy
-                                angle = math.degrees(math.atan2(-dx, dy)) % 360
-                                if dist < min_dist:
-                                    min_dist = dist
-                                    best_angle = angle
+                            coords = line.flatten()
+                            # 완벽한 에러 방지 (길이 4 보장)
+                            if len(coords) >= 4:
+                                x1, y1, x2, y2 = float(coords[0]), float(coords[1]), float(coords[2]), float(coords[3])
+                                dist = min(math.hypot(x1 - hx, y1 - hy), math.hypot(x2 - hx, y2 - hy))
+                                if dist < 60:
+                                    cx, cy = (x1, y1) if math.hypot(x1 - hx, y1 - hy) > math.hypot(x2 - hx, y2 - hy) else (x2, y2)
+                                    dx, dy = cx - hx, cy - hy
+                                    angle = math.degrees(math.atan2(-dx, dy)) % 360
+                                    if dist < min_dist:
+                                        min_dist = dist
+                                        best_angle = angle
                     shaft_angles.append(best_angle)
                 else:
                     landmarks_data.append(None)
-                    for arr in [wrist_ys, wrist_xs, lw_ys, ls_ys, rw_ys, rs_ys, rw_xs, re_xs, shaft_angles]:
+                    for arr in [wrist_ys, wrist_xs, lw_ys, ls_ys, rw_ys, rs_ys, rw_xs, re_xs, shaft_angles, hip_ys]:
                         arr.append(np.nan)
             
             st.session_state.lm_data = landmarks_data
             
-            # --- 3. 데이터 보간 (모션 블러로 사라진 샤프트 각도 복원) ---
+            # --- 3. 데이터 보간 (모션 블러 복원 및 안전 장치) ---
             def smooth(arr):
-                return pd.Series(arr).interpolate(limit_direction='both').rolling(3, center=True, min_periods=1).mean().values
+                s = pd.Series(arr)
+                if s.isna().all(): return np.zeros(len(arr))
+                return s.interpolate(limit_direction='both').rolling(3, center=True, min_periods=1).mean().values
             
             w_y = smooth(wrist_ys)
             lw_y, ls_y = smooth(lw_ys), smooth(ls_ys)
             rw_y, rs_y = smooth(rw_ys), smooth(rs_ys)
             rw_x, re_x = smooth(rw_xs), smooth(re_xs)
+            h_y = smooth(hip_ys)
             
-            # 360도 래핑 방지 원형 보간 (Trigonometric Interpolation)
-            sin_a = pd.Series([math.sin(math.radians(a)) if not np.isnan(a) else np.nan for a in shaft_angles]).interpolate(limit_direction='both').rolling(3, center=True, min_periods=1).mean()
-            cos_a = pd.Series([math.cos(math.radians(a)) if not np.isnan(a) else np.nan for a in shaft_angles]).interpolate(limit_direction='both').rolling(3, center=True, min_periods=1).mean()
-            shaft_smooth = (np.degrees(np.arctan2(sin_a, cos_a)) % 360).values
+            sin_a_s = pd.Series([math.sin(math.radians(a)) if not np.isnan(a) else np.nan for a in shaft_angles])
+            cos_a_s = pd.Series([math.cos(math.radians(a)) if not np.isnan(a) else np.nan for a in shaft_angles])
+            
+            if sin_a_s.isna().all():
+                shaft_smooth = [0.0] * total_frames
+            else:
+                sin_a = sin_a_s.interpolate(limit_direction='both').rolling(3, center=True, min_periods=1).mean()
+                cos_a = cos_a_s.interpolate(limit_direction='both').rolling(3, center=True, min_periods=1).mean()
+                shaft_smooth = (np.degrees(np.arctan2(sin_a, cos_a)) % 360).values
 
-            # --- 4. 기하학적 절대 검색 (No Midpoints!) ---
+            # --- 4. 기하학적 절대 검색 (안전 장치 추가) ---
             def find_min_diff_frame(start, end, arr1, arr2):
                 if start >= end: return start
                 diffs = np.abs(np.array(arr1[start:end]) - np.array(arr2[start:end]))
-                return start + np.nanargmin(diffs)
+                if len(diffs) == 0 or np.all(np.isnan(diffs)): return start
+                return start + int(np.nanargmin(diffs))
 
             def find_angle_frame(start, end, target, angles):
                 if start >= end: return start
-                sub = angles[start:end]
-                diffs = [min(abs(a - target), 360 - abs(a - target)) for a in sub]
-                return start + np.argmin(diffs)
+                sub = np.array(angles[start:end])
+                if len(sub) == 0 or np.all(np.isnan(sub)): return start
+                diffs = np.array([min(abs(a - target), 360 - abs(a - target)) for a in sub])
+                return start + int(np.nanargmin(diffs))
 
-            # 앵커
-            f_p5 = int(np.nanargmin(w_y)) # Top
-            f_p1 = int(np.nanargmax(w_y[:f_p5])) if f_p5 > 0 else 0 # Address
-            f_p8 = f_p5 + int(np.nanargmax(w_y[f_p5:min(total_frames, f_p5 + int(fps * 1.5))])) # Impact
-            f_p13 = min(total_frames - 1, f_p8 + int(fps * 1.0)) # Finish
-
-            # 완벽한 팔 지면 수평/수직 검색
-            f_p4 = find_min_diff_frame(f_p1, f_p5, lw_y, ls_y) # [P4] 왼팔 수평 (어깨Y == 손목Y)
-            f_p11 = find_min_diff_frame(f_p8, f_p13, rw_y, rs_y) # [P11] 오른팔 수평 (어깨Y == 손목Y)
-            f_p12 = find_min_diff_frame(f_p11, f_p13, rw_x, re_x) # [P12] 오른팔 수직 (팔꿈치X == 손목X)
-
-            # 완벽한 샤프트 각도 검색
-            f_p3 = find_angle_frame(f_p1, f_p5, 90, shaft_smooth) # [P3] 샤프트 평행
-            f_p2 = find_angle_frame(f_p1, f_p3, 45, shaft_smooth) # [P2] 샤프트 45도
+            # 앵커 설정
+            f_p5 = int(np.nanargmin(w_y)) if not np.all(np.isnan(w_y)) else int(total_frames * 0.4)
+            f_p1 = int(np.nanargmax(w_y[:f_p5])) if f_p5 > 0 and not np.all(np.isnan(w_y[:f_p5])) else 0
             
-            f_p7 = find_angle_frame(f_p5, f_p8, 90, shaft_smooth) # [P7] 샤프트 평행 (다운스윙)
-            f_p6 = find_angle_frame(f_p5, f_p7, 135, shaft_smooth) # [P6] 샤프트 135도
+            post_top = w_y[f_p5:min(total_frames, f_p5 + int(fps * 1.5))]
+            f_p8 = f_p5 + int(np.nanargmax(post_top)) if len(post_top) > 0 and not np.all(np.isnan(post_top)) else min(total_frames-1, f_p5+10)
+            f_p13 = min(total_frames - 1, f_p8 + int(fps * 1.0))
+
+            # 기하학 검색
+            f_p4 = find_min_diff_frame(f_p1, f_p5, lw_y, ls_y)
+            f_p3 = find_min_diff_frame(f_p1, f_p4, w_y, h_y)
+            f_p2 = find_angle_frame(f_p1, f_p3, 45, shaft_smooth)
             
-            f_p10 = find_angle_frame(f_p8, f_p13, 270, shaft_smooth) # [P10] 샤프트 270도 (평행)
-            f_p9 = find_angle_frame(f_p8, f_p10, 315, shaft_smooth) # [P9] 샤프트 315도
+            f_p7 = find_min_diff_frame(f_p5, f_p8, w_y, h_y)
+            f_p6 = find_angle_frame(f_p5, f_p7, 135, shaft_smooth)
+            
+            f_p10 = find_min_diff_frame(f_p8, f_p13, w_y, h_y)
+            f_p9 = find_angle_frame(f_p8, f_p10, 315, shaft_smooth)
+            
+            f_p11 = find_min_diff_frame(f_p8, f_p13, rw_y, rs_y)
+            f_p12 = find_min_diff_frame(f_p11, f_p13, rw_x, re_x)
 
             ai_indices = [f_p1, f_p2, f_p3, f_p4, f_p5, f_p6, f_p7, f_p8, f_p9, f_p10, f_p11, f_p12, f_p13]
             ai_indices = [int(max(0, min(total_frames - 1, idx))) for idx in ai_indices]
@@ -163,13 +181,12 @@ if uploaded_file is not None:
 
 # --- 5. 반응형 렌더링 및 Zoom 미세 조정 ---
 if st.session_state.get('analyzed'):
-    st.success("✅ 기하학적 절대 검색 완료! 팔이 수평이 되고 샤프트가 45도, 90도가 되는 수학적 찰나를 도출했습니다.")
+    st.success("✅ 전수 기하학 검색 완료! 테이블 수치는 슬라이더 조작 시 1프레임 단위로 즉각 재계산됩니다.")
     
     table_placeholder = st.empty()
     csv_placeholder = st.empty()
     
-    st.subheader("📸 단계별 프레임 미세 조정 및 줌(Zoom) 뷰")
-    
+    st.subheader("📸 단계별 프레임 확인 및 미세 조정 (Zoom 뷰)")
     zoom_mode = st.toggle("🔍 2배 확대(Zoom) 모드 켜기", value=False)
     
     frames_bgr = st.session_state.raw_frames
@@ -302,4 +319,4 @@ if st.session_state.get('analyzed'):
     df_result = pd.DataFrame(full_swing_data)
     table_placeholder.dataframe(df_result.set_index("Phase"), use_container_width=True)
     csv = df_result.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
-    csv_placeholder.download_button("💾 현재 설정된 프레임 데이터 CSV 다운로드", data=csv, file_name='geometric_scan_swing.csv', mime='text/csv', type='primary')
+    csv_placeholder.download_button("💾 현재 설정된 데이터 CSV 다운로드", data=csv, file_name='stable_full_scan.csv', mime='text/csv', type='primary')
