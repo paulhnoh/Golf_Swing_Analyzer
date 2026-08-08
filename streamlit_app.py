@@ -2,30 +2,64 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import tempfile
+import os
 import math
 import cv2
 import av
 from PIL import Image, ImageDraw, ImageFont
 import mediapipe as mp
+from yt_dlp import YoutubeDL
 
 st.set_page_config(page_title="AI 정밀 골프 스윙 분석 시스템", layout="wide")
 
-st.title("⛳ AI 정밀 골프 스윙 분석 시스템 (Cloud Optimized Edition)")
-st.write("PC 리소스 걱정 없이 Streamlit 클라우드 환경에서 구동되는 전문가용 1프레임 정밀 분석 툴입니다.")
+st.title("⛳ AI 정밀 골프 스윙 분석 시스템 (YouTube & Cloud 통합 에디션)")
+st.write("PC 리소스 걱정 없이, 내 컴퓨터의 영상 파일을 업로드하거나 유튜브 링크를 입력하여 클라우드 서버에서 즉시 전수 스캔 및 미세조정을 수행합니다.")
 
-uploaded_file = st.file_uploader("스윙 영상을 업로드하세요 (MP4, MOV 등)", type=["mp4", "mov", "avi"])
+# 입력 소스 선택 탭 (1. 파일 업로드 vs 2. 유튜브 URL 자동 수집)
+input_method = st.radio("분석할 영상 소스를 선택하세요:", ["📁 내 컴퓨터에서 영상 파일 업로드", "🔗 유튜브(YouTube) 링크로 분석하기"])
 
+video_path = None
+
+if input_method == "📁 내 컴퓨터에서 영상 파일 업로드":
+    uploaded_file = st.file_uploader("스윙 영상을 업로드하세요 (MP4, MOV 등)", type=["mp4", "mov", "avi"])
+    if uploaded_file is not None:
+        tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+        tfile.write(uploaded_file.read())
+        video_path = tfile.name
+
+else:
+    yt_url = st.text_input("분석할 유튜브(YouTube) 영상 링크를 입력하세요:", placeholder="https://www.youtube.com/watch?v=...")
+    if yt_url:
+        if st.button("유튜브 영상 클라우드로 다운로드", type="secondary"):
+            with st.spinner("클라우드 서버에서 유튜브 영상을 안전하게 다운로드하고 있습니다..."):
+                try:
+                    output_dir = tempfile.mkdtemp()
+                    out_template = os.path.join(output_dir, 'yt_swing.mp4')
+                    
+                    ydl_opts = {
+                        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]',
+                        'outtmpl': out_template,
+                        'noplaylist': True,
+                    }
+                    with YoutubeDL(ydl_opts) as ydl:
+                        ydl.download([yt_url])
+                    
+                    video_path = out_template
+                    st.session_state.yt_downloaded_path = video_path
+                    st.success("✅ 유튜브 영상 다운로드 및 클라우드 적재 완료!")
+                except Exception as e:
+                    st.error(f"❌ 유튜브 다운로드 실패: {e}")
+        elif 'yt_downloaded_path' in st.session_state:
+            video_path = st.session_state.yt_downloaded_path
+
+# 상태 유지 초기화
 if 'analyzed' not in st.session_state: st.session_state.analyzed = False
 if 'user_frames' not in st.session_state: st.session_state.user_frames = {}
 
-if uploaded_file is not None:
-    tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
-    tfile.write(uploaded_file.read())
-    video_path = tfile.name
-
+if video_path is not None:
     st.video(video_path)
 
-    if st.button("스윙 정밀 분석 시작", type="primary"):
+    if st.button("스윙 정밀 분석 시작 (전수 스캔)", type="primary"):
         with st.spinner("클라우드 서버에서 무손실 프레임 추출 및 관절 스캔을 진행 중입니다..."):
             
             # --- 1. PyAV 무손실 프레임 추출 ---
@@ -103,7 +137,7 @@ if uploaded_file is not None:
             f_p8 = f_p5 + int(np.nanargmax(post_top)) if len(post_top) > 0 and not np.all(np.isnan(post_top)) else min(total_frames-1, f_p5+10)
             f_p13 = min(total_frames - 1, f_p8 + int(fps * 1.0))
 
-            # 비선형 골든 비율 초기값 배정 (미세조정의 베이스캠프)
+            # 비선형 골든 비율 초기값 배정
             f_p2 = f_p1 + int((f_p5 - f_p1) * 0.42)
             f_p3 = f_p1 + int((f_p5 - f_p1) * 0.48)
             f_p4 = f_p1 + int((f_p5 - f_p1) * 0.61)
@@ -237,7 +271,7 @@ if st.session_state.get('analyzed'):
                 elif p_code == "P12":
                     draw.line([(re_x, re_y), (rw_x, rw_y)], fill=c_line, width=line_w)
                     draw.text((rw_x + 40, rw_y - 20), "Right Arm Vertical", font=font, fill=c_text)
-                elif p_code == "P13": draw.text((hx - 80, hy - 120), "Finish", font=font, fill=c_text)
+                elif p_code == "P13": draw_shaft("0°", 0)
                 
                 if zoom_mode and lm:
                     crop_size = int(min(w, h) * 0.6)
@@ -264,4 +298,4 @@ if st.session_state.get('analyzed'):
     df_result = pd.DataFrame(full_swing_data)
     table_placeholder.dataframe(df_result.set_index("Phase"), use_container_width=True)
     csv = df_result.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
-    csv_placeholder.download_button("💾 현재 설정된 프레임 데이터 CSV 다운로드", data=csv, file_name='cloud_swing_analysis.csv', mime='text/csv', type='primary')
+    csv_placeholder.download_button("💾 현재 설정된 프레임 데이터 CSV 다운로드", data=csv, file_name='youtube_cloud_analysis.csv', mime='text/csv', type='primary')
