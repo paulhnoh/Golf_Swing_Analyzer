@@ -2,17 +2,14 @@
 ================================================================================
 [절대 준수 원칙 - 시스템 설계 철학 및 분석 파이프라인]
 1. 물리적 프레임 전수 추출 (Frame-by-Frame Physical Storage):
-   - 영상의 전체 프레임을 OpenCV로 열어 temp 디렉토리에 개별 JPG 이미지 파일로 
-     완벽하게 분리 저장한 뒤, 저장된 이미지를 불러와서 분석을 수행함. (메모리 꼬임 방지)
-2. 물리적 특징점 기반 매핑 (Heuristic Anchoring):
-   - 13등분 방식 금지. 스윙의 물리적 변곡점을 기준으로 싯점 자동 매핑.
-   - P8 (Impact): 손목 Y좌표가 가장 낮은 프레임.
-   - P5 (Top): P1~P8 사이 왼손 Y좌표가 가장 높은 프레임.
-   - P3/P7/P10 (수평): 샤프트 각도 90도/270도와 가장 가까운 프레임 검색.
-3. 풀 바디 및 클럽 뷰 (Full Body & Club Cropping):
-   - 클럽 헤드, 샤프트, 공이 잘리지 않도록 광폭 뷰(400px 이상 여백)로 크롭 유지.
-4. 오버레이 시각화 및 전문가 미세조정 (Visual Overlay & Expert UI):
-   - 샤프트 선(초록색)과 측정 각도 수치를 이미지에 직접 오버레이하고, Slider로 즉시 보정 가능하게 함.
+   - 영상 전체 프레임을 temp 디렉토리에 개별 JPG 이미지로 완벽히 분리 저장 후 분석 수행.
+2. 풀 프레임 뷰 보장 (Full-Frame View):
+   - 임의의 크롭을 전면 폐지하고 원본 전체 화면을 출력하여 클럽 헤드, 샤프트, 공이 100% 노출되도록 함.
+3. Phase 정의 맞춤형 오버레이 시각화 (Definition-Based Visual Overlay):
+   - 샤프트 수직(P1), 수평(P3, P7, P10), 팔 수평(P4, P11), 각도(P2, P6, P9) 등 
+     Phase 정의에 부합하는 가이드라인과 실측 각도를 직관적으로 오버레이함.
+4. 전문가 미세조정 (Expert UI):
+   - Slider를 통해 언제든 즉시 프레임 미세조정 가능.
 ================================================================================
 """
 
@@ -27,8 +24,8 @@ from PIL import Image
 from ultralytics import YOLO
 
 st.set_page_config(page_title="P1-P13 Pro Swing Analyzer", layout="wide")
-st.title("⛳ 골프 스윙 P1~P13 정밀 분석 및 오버레이 시스템")
-st.markdown("물리적 프레임 저장 방식 기반으로 클럽과 샤프트를 온전히 포착하여 오버레이 분석을 수행합니다.")
+st.title("⛳ 골프 스윙 P1~P13 정밀 분석 및 맞춤형 오버레이 시스템")
+st.markdown("전체 화면 뷰를 통해 클럽과 공을 온전히 보장하며, 페이즈 정의에 맞춘 정밀 오버레이를 제공합니다.")
 
 @st.cache_resource
 def load_models():
@@ -37,19 +34,19 @@ def load_models():
 pose_model, custom_model = load_models()
 
 phases_info = [
-    {"phase": "P1", "name": "Address", "desc": "스윙 시작 전 정지 상태", "target_angle": 0},
-    {"phase": "P2", "name": "Start Sweep", "desc": "샤프트가 지면과 45°", "target_angle": 45},
-    {"phase": "P3", "name": "Back Alignment", "desc": "샤프트가 지면에 평행", "target_angle": 90},
-    {"phase": "P4", "name": "Start Shoulder Back", "desc": "왼팔이 지면에 평행", "target_angle": None},
-    {"phase": "P5", "name": "Backswing Top", "desc": "왼손 최고점 (체공시간 측정)", "target_angle": None},
-    {"phase": "P6", "name": "Transition", "desc": "샤프트가 지면과 45°", "target_angle": 135},
-    {"phase": "P7", "name": "DB Alignment", "desc": "샤프트가 지면에 평행", "target_angle": 90},
-    {"phase": "P8", "name": "Impact", "desc": "볼을 타격하는 지점", "target_angle": None},
-    {"phase": "P9", "name": "Lowest Club Head", "desc": "샤프트가 지면과 45°", "target_angle": 315},
-    {"phase": "P10", "name": "DF Alignment", "desc": "샤프트가 지면에 평행", "target_angle": 270},
-    {"phase": "P11", "name": "Start Shoulder Forward", "desc": "오른팔이 지면에 평행", "target_angle": None},
-    {"phase": "P12", "name": "Downswing Top", "desc": "오른손 최고점 (체공시간 측정)", "target_angle": None},
-    {"phase": "P13", "name": "Finish", "desc": "스윙이 끝날 때의 정지 상태", "target_angle": None},
+    {"phase": "P1", "name": "Address", "desc": "샤프트가 지면과 수직", "target_angle": 90, "type": "shaft_vert"},
+    {"phase": "P2", "name": "Start Sweep", "desc": "샤프트가 지면과 45°", "target_angle": 45, "type": "shaft_deg"},
+    {"phase": "P3", "name": "Back Alignment", "desc": "샤프트가 지면에 평행", "target_angle": 0, "type": "shaft_horiz"},
+    {"phase": "P4", "name": "Start Shoulder Back", "desc": "왼팔이 지면에 평행", "target_angle": 0, "type": "arm_horiz_left"},
+    {"phase": "P5", "name": "Backswing Top", "desc": "왼손 최고점 (체공시간 측정)", "target_angle": None, "type": "top"},
+    {"phase": "P6", "name": "Transition", "desc": "샤프트가 지면과 135°", "target_angle": 135, "type": "shaft_deg"},
+    {"phase": "P7", "name": "DB Alignment", "desc": "샤프트가 지면에 평행", "target_angle": 0, "type": "shaft_horiz"},
+    {"phase": "P8", "name": "Impact", "desc": "볼을 타격하는 지점", "target_angle": None, "type": "impact"},
+    {"phase": "P9", "name": "Lowest Club Head", "desc": "샤프트가 지면과 315°", "target_angle": 315, "type": "shaft_deg"},
+    {"phase": "P10", "name": "DF Alignment", "desc": "샤프트가 지면에 평행", "target_angle": 0, "type": "shaft_horiz"},
+    {"phase": "P11", "name": "Start Shoulder Forward", "desc": "오른팔이 지면에 평행", "target_angle": 0, "type": "arm_horiz_right"},
+    {"phase": "P12", "name": "Downswing Top", "desc": "오른손 최고점 (체공시간 측정)", "target_angle": None, "type": "top"},
+    {"phase": "P13", "name": "Finish", "desc": "스윙 종료 정지 상태", "target_angle": None, "type": "finish"},
 ]
 
 def calculate_peak_duration(y_coords, fps=30, threshold=10.0):
@@ -71,9 +68,8 @@ if uploaded_file:
         st.session_state.clear()
         st.session_state.current_file_name = uploaded_file.name
 
-    # 원칙 1: 영상 전체를 물리적 이미지(JPG)로 개별 분리 저장 후 분석
     if 'auto_frames' not in st.session_state:
-        with st.spinner("1단계: 전체 프레임을 개별 이미지 파일로 물리적 추출 및 저장 중..."):
+        with st.spinner("1단계: 전체 프레임을 물리적 이미지로 분리 및 전수 스캔 중..."):
             tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
             tfile.write(uploaded_file.read())
             frame_dir = tempfile.mkdtemp()
@@ -89,11 +85,9 @@ if uploaded_file:
                 ret, frame = cap.read()
                 if not ret or total_frames > 600: break
                 
-                # 물리적 이미지 저장
                 img_path = os.path.join(frame_dir, f"frame_{total_frames:04d}.jpg")
                 cv2.imwrite(img_path, frame)
                 
-                # 저장된 이미지를 즉시 불러와서 분석 (원칙 1 준수)
                 analyzed_frame = cv2.imread(img_path)
                 p_res = pose_model(analyzed_frame, verbose=False)[0]
                 c_res = custom_model(analyzed_frame, verbose=False)[0]
@@ -119,14 +113,15 @@ if uploaded_file:
                         elif name == 'shaft': shaft = cent
                     target = head if head else shaft
                     if wrist_pt and target:
-                        sa = abs(math.degrees(math.atan2(target[1]-wrist_pt[1], target[0]-wrist_pt[0])))
+                        # 지면 기준 각도 계산 (수평 기준 0도 ~ 90도 수직)
+                        raw_angle = math.degrees(math.atan2(target[1]-wrist_pt[1], target[0]-wrist_pt[0]))
+                        sa = abs(raw_angle)
                 
                 y_left.append(ly); y_right.append(ry)
                 left_arm_angles.append(la); right_arm_angles.append(ra); shaft_angles.append(sa)
                 total_frames += 1
             cap.release()
             
-            # 원칙 2: 물리적 변곡점 기반 매핑 (Heuristic Anchoring)
             valid_ly = [(i, y) for i, y in enumerate(y_left) if not np.isnan(y)]
             p8_idx = max(valid_ly, key=lambda x: x[1])[0] if valid_ly else total_frames // 2
             p1_idx = valid_ly[0][0] if valid_ly else 0
@@ -139,13 +134,16 @@ if uploaded_file:
             p12_idx = p8_idx + min(sub_ry, key=lambda x: x[1])[0] if sub_ry else total_frames - 2
 
             auto_f = {"P1": p1_idx, "P5": p5_idx, "P8": p8_idx, "P12": p12_idx, "P13": p13_idx}
-            auto_f["P2"] = find_closest_frame(shaft_angles, 45, auto_f["P1"], auto_f["P5"])
-            auto_f["P3"] = find_closest_frame(shaft_angles, 90, auto_f["P2"], auto_f["P5"])
-            auto_f["P4"] = find_closest_frame(left_arm_angles, 0, auto_f["P3"], auto_f["P5"])
-            auto_f["P6"] = find_closest_frame(shaft_angles, 45, auto_f["P5"], auto_f["P8"])
-            auto_f["P7"] = find_closest_frame(shaft_angles, 90, auto_f["P6"], auto_f["P8"])
+            
+            # 0번 프레임 쏠림 방지를 위한 구간 안전 분할 보정
+            auto_f["P2"] = max(p1_idx + 2, find_closest_frame(shaft_angles, 45, auto_f["P1"], auto_f["P5"]))
+            auto_f["P3"] = max(auto_f["P2"] + 2, find_closest_frame(shaft_angles, 0, auto_f["P2"], auto_f["P5"]))
+            auto_f["P4"] = max(auto_f["P3"] + 2, find_closest_frame(left_arm_angles, 0, auto_f["P3"], auto_f["P5"]))
+            
+            auto_f["P6"] = find_closest_frame(shaft_angles, 135, auto_f["P5"], auto_f["P8"])
+            auto_f["P7"] = find_closest_frame(shaft_angles, 0, auto_f["P6"], auto_f["P8"])
             auto_f["P9"] = find_closest_frame(shaft_angles, 45, auto_f["P8"], auto_f["P12"])
-            auto_f["P10"] = find_closest_frame(shaft_angles, 90, auto_f["P9"], auto_f["P12"])
+            auto_f["P10"] = find_closest_frame(shaft_angles, 0, auto_f["P9"], auto_f["P12"])
             auto_f["P11"] = find_closest_frame(right_arm_angles, 0, auto_f["P10"], auto_f["P12"])
 
             st.session_state.p5_time = calculate_peak_duration(y_left[:p8_idx], fps)
@@ -156,9 +154,8 @@ if uploaded_file:
             st.session_state.fps = fps
             st.session_state.scan_done = True
 
-    # 원칙 4: 저장된 개별 이미지 불러오기 및 오버레이 시각화 (Expert UI)
     if 'scan_done' in st.session_state:
-        st.subheader("📸 페이즈별 정밀 오버레이 검증 뷰 (물리적 저장 이미지 기반)")
+        st.subheader("📸 페이즈별 풀 프레임 정밀 오버레이 검증 뷰")
         cols = st.columns(4)
         analysis_data = []
 
@@ -168,11 +165,10 @@ if uploaded_file:
                 auto_fn = st.session_state.auto_frames.get(phase_id, 0)
                 fn = st.slider(f"[{phase_id}] 조정", 0, st.session_state.total_frames-1, auto_fn, key=f"slider_{phase_id}")
                 
-                # 물리적으로 저장된 개별 이미지 파일을 정확히 불러옴
                 img_path = os.path.join(st.session_state.frame_dir, f"frame_{fn:04d}.jpg")
                 img = cv2.imread(img_path)
                 
-                measured_angle = 0.0
+                measured_val = 0.0
                 if img is not None:
                     p_res = pose_model(img, verbose=False)[0]
                     c_res = custom_model(img, verbose=False)[0]
@@ -191,24 +187,32 @@ if uploaded_file:
                         elif name == 'shaft': shaft = cent
                     target_pt = head if head else shaft
 
-                    # 오버레이 시각화 (초록색 샤프트 선 및 각도)
+                    # 💡 정의 맞춤형 오버레이 시각화
                     if wrist_pt and target_pt:
                         cv2.circle(img, wrist_pt, 8, (0, 255, 255), -1)
                         cv2.circle(img, target_pt, 8, (0, 0, 255), -1)
-                        cv2.line(img, wrist_pt, target_pt, (0, 255, 0), 4)
                         
-                        dx = target_pt[0] - wrist_pt[0]
-                        dy = target_pt[1] - wrist_pt[1]
-                        measured_angle = round(abs(math.degrees(math.atan2(dy, dx))), 1)
-                        cv2.putText(img, f"Angle: {measured_angle}deg", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                        # Phase 정의에 따른 의미 있는 오버레이 라인 및 텍스트
+                        if p['type'] in ['shaft_vert', 'shaft_horiz', 'shaft_deg']:
+                            cv2.line(img, wrist_pt, target_pt, (0, 255, 0), 4)
+                            dx = target_pt[0] - wrist_pt[0]
+                            dy = target_pt[1] - wrist_pt[1]
+                            measured_val = round(abs(math.degrees(math.atan2(dy, dx))), 1)
+                            cv2.putText(img, f"Shaft Angle: {measured_val}deg", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                        elif 'arm_horiz' in p['type'] and p_res.keypoints is not None:
+                            kpts = p_res.keypoints.xy[0].cpu().numpy()
+                            shoulder_idx = 5 if 'left' in p['type'] else 6
+                            wrist_idx = 9 if 'left' in p['type'] else 10
+                            if kpts[shoulder_idx][0] > 0 and kpts[wrist_idx][0] > 0:
+                                s_pt = (int(kpts[shoulder_idx][0]), int(kpts[shoulder_idx][1]))
+                                w_pt = (int(kpts[wrist_idx][0]), int(kpts[wrist_idx][1]))
+                                cv2.line(img, s_pt, w_pt, (0, 255, 0), 4)
+                                dy = w_pt[1] - s_pt[1]
+                                dx = w_pt[0] - s_pt[0]
+                                measured_val = round(abs(math.degrees(math.atan2(dy, dx))), 1)
+                                cv2.putText(img, f"Arm Tilt: {measured_val}deg", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-                    # 원칙 3: 클럽과 공이 잘리지 않도록 광폭 뷰 크롭 (400px 여유 확보)
-                    if p_res.keypoints is not None and len(p_res.keypoints.xy[0]) > 5:
-                        k = p_res.keypoints.xy[0].cpu().numpy()
-                        if k[5][0] > 0 and k[6][0] > 0:
-                            cx, cy = int((k[5][0]+k[6][0])/2), int((k[5][1]+k[6][1])/2)
-                            img = img[max(0, cy-450):min(img.shape[0], cy+450), max(0, cx-450):min(img.shape[1], cx+450)]
-                    
+                    # 💡 [핵심] 크롭을 완전히 제거하고 원본 전체 화면(Full-Frame) 유지 -> 클럽과 볼 100% 보장
                     st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption=f"[{phase_id}] {p['name']}")
                 
                 head_still = 0.0
@@ -219,8 +223,8 @@ if uploaded_file:
                     "Phase": phase_id,
                     "Name": p['name'],
                     "정의 기준 (Target)": p['desc'],
-                    "목표 각도": p['target_angle'] if p['target_angle'] is not None else "수평/기타",
-                    "AI 측정 각도": measured_angle,
+                    "목표 값": str(p['target_angle']) if p['target_angle'] is not None else "특정 변곡점",
+                    "AI 측정 값": measured_val,
                     "Frame #": fn,
                     "Time Stamp(s)": round(fn / st.session_state.fps, 2),
                     "HeadStill Time": head_still
