@@ -1,7 +1,7 @@
 streamlit
-av
-mediapipe==0.10.14
-numpy
-pandas
 ultralytics
+opencv-python-headless
+pillow
+numpy
+streamlit-image-coordinates
 yt-dlp
