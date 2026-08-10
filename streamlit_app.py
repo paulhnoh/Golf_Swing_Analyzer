@@ -5,7 +5,6 @@ import cv2
 import math
 import os
 import tempfile
-import shutil
 from PIL import Image
 from ultralytics import YOLO
 from streamlit_image_coordinates import streamlit_image_coordinates
@@ -66,19 +65,16 @@ def find_closest_frame(arr, target, start_idx, end_idx):
 uploaded_file = st.file_uploader("스윙 영상을 업로드하세요 (MP4, MOV 등)", type=['mp4', 'mov', 'avi'])
 
 if uploaded_file:
-    # 세션 초기화 로직 (새 파일 업로드 시)
     if 'current_file_name' not in st.session_state or st.session_state.current_file_name != uploaded_file.name:
         st.session_state.clear()
         st.session_state.current_file_name = uploaded_file.name
 
     if 'auto_frames' not in st.session_state:
-        # [1단계] 영상의 모든 프레임을 물리적 이미지 파일(jpg)로 추출
         with st.spinner("1단계: 영상의 모든 프레임을 개별 이미지로 분리하여 서버에 저장 중입니다..."):
             tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
             tfile.write(uploaded_file.read())
             video_path = tfile.name
             
-            # 클라우드에 임시 이미지 폴더 생성
             frame_dir = tempfile.mkdtemp()
             st.session_state.frame_dir = frame_dir
             
@@ -88,9 +84,8 @@ if uploaded_file:
             
             while cap.isOpened():
                 ret, frame = cap.read()
-                if not ret or total_frames > 600: # 최대 20초 분량 제한
+                if not ret or total_frames > 600:
                     break
-                # 프레임을 명확한 번호의 jpg 파일로 저장 (예: frame_0001.jpg)
                 img_path = os.path.join(frame_dir, f"frame_{total_frames:04d}.jpg")
                 cv2.imwrite(img_path, frame)
                 total_frames += 1
@@ -98,13 +93,11 @@ if uploaded_file:
             st.session_state.total_frames = total_frames
             st.session_state.fps = fps
 
-        # [2단계] 저장된 이미지 파일들을 하나씩 불러와서 정밀 분석
         with st.spinner(f"2단계: 저장된 {total_frames}장의 이미지를 AI가 전수 스캔 중입니다..."):
             left_hand_ys, right_hand_ys = [], []
             left_arm_angles, right_arm_angles, shaft_angles = [], [], []
             
             for f_idx in range(total_frames):
-                # 메모리상의 영상이 아닌, 확실히 저장된 이미지 파일을 읽어옴
                 img_path = os.path.join(st.session_state.frame_dir, f"frame_{f_idx:04d}.jpg")
                 frame = cv2.imread(img_path)
                 
@@ -114,7 +107,6 @@ if uploaded_file:
                 ly, ry, la_angle, ra_angle, s_angle = np.nan, np.nan, np.nan, np.nan, np.nan
                 wrist_pt = None
                 
-                # 손목 및 팔 각도 분석
                 if p_res[0].keypoints is not None and len(p_res[0].keypoints.xy) > 0:
                     kpts = p_res[0].keypoints.xy[0].cpu().numpy()
                     if len(kpts) > 10:
@@ -132,7 +124,6 @@ if uploaded_file:
                         if l_w[0] > 0 and r_w[0] > 0:
                             wrist_pt = ((l_w[0]+r_w[0])/2, (l_w[1]+r_w[1])/2)
                 
-                # 샤프트(블러) 분석
                 head_pt, shaft_pt = None, None
                 for box in c_res[0].boxes:
                     cls_name = c_res[0].names[int(box.cls[0].item())]
@@ -155,7 +146,6 @@ if uploaded_file:
                 right_arm_angles.append(ra_angle)
                 shaft_angles.append(s_angle)
 
-            # 자동 프레임 매핑 로직
             auto_f = {}
             valid_wrist = [y for y in left_hand_ys if not np.isnan(y)]
             p8_idx = left_hand_ys.index(max(valid_wrist)) if valid_wrist else total_frames // 2
@@ -189,7 +179,7 @@ if uploaded_file:
             st.session_state.scan_done = True
 
     # ---------------------------------------------------------
-    # 4. 미세조정 UI (물리적 이미지 파일 불러오기)
+    # 4. 미세조정 UI 
     # ---------------------------------------------------------
     if 'scan_done' in st.session_state:
         st.subheader("📸 자동 추출 프레임 확인 및 수동 클릭 보정")
@@ -204,10 +194,8 @@ if uploaded_file:
                 phase_id = p['phase']
                 auto_frame_num = st.session_state.auto_frames[phase_id]
                 
-                # 슬라이더
                 frame_num = st.slider(f"[{phase_id}] 프레임 조정", 0, total_frames-1, auto_frame_num, key=f"slider_{phase_id}")
                 
-                # 💡 안전성 핵심: 비디오에서 추출하는 것이 아니라, 이미 저장된 jpg 파일을 확정적으로 불러옵니다.
                 img_path = os.path.join(st.session_state.frame_dir, f"frame_{frame_num:04d}.jpg")
                 frame = cv2.imread(img_path)
                 
@@ -249,18 +237,21 @@ if uploaded_file:
                             st.session_state[session_key] = clicked_pt
                             st.rerun()
                 
-                head_still = ""
+                # 💡 [핵심 수정] 빈 문자열("") 대신 None 객체를 사용하여 데이터 타입 오류(Crash) 완벽 차단
+                head_still = None
                 if phase_id == "P5": head_still = st.session_state.p5_time
                 if phase_id == "P12": head_still = st.session_state.p12_time
+                
+                ref_angle_val = float(p['ref_angle']) if p['ref_angle'] else None
                 
                 row = {
                     "Phase": phase_id, "Name": p['name'], "기준": p['desc'],
                     "Time Stamp(s)": round(frame_num / fps, 2), "Frame #": frame_num,
-                    "ShoulderTilt": "", "Shoulder Rotation": "", "HipTilt": "", "Hip Rotation": "", 
-                    "LtElbow": "", "RtElbow": "", "LtShoulderAngle": "", "RtShoulderAngle": "", 
-                    "LtKnee": "", "RtKnee": "", 
-                    "ClubAngle": p['ref_angle'], 
-                    "ClubSpeed": "", "HeadStill Time": head_still
+                    "ShoulderTilt": None, "Shoulder Rotation": None, "HipTilt": None, "Hip Rotation": None, 
+                    "LtElbow": None, "RtElbow": None, "LtShoulderAngle": None, "RtShoulderAngle": None, 
+                    "LtKnee": None, "RtKnee": None, 
+                    "ClubAngle": ref_angle_val, 
+                    "ClubSpeed": None, "HeadStill Time": head_still
                 }
                 analysis_data.append(row)
 
