@@ -1,15 +1,14 @@
 """
 ================================================================================
 [절대 준수 원칙 - 시스템 설계 철학 및 분석 파이프라인 (변경 불가)]
-1. 데이터 노이즈 필터링 (Rolling Median Smoothing):
-   - Pose 모델의 일시적 오류(좌표 튐 현상)로 인해 프레임이 한 곳(예: 162번)에 쏠리지 않도록, 
-     DB 구축 후 손목 좌표에 통계적 스무딩을 적용하여 완벽한 변곡점(P5, P8, P12)을 찾아냄.
-2. 최고 신뢰도 객체 매칭 (Max Confidence Tracking):
-   - 수동 프레임 미세조정 시 녹색 라인이 엉뚱한 곳으로 튀는 것을 막기 위해, 
-     감지된 박스 중 Confidence(신뢰도)가 가장 높은 객체만 엄격히 오버레이에 사용함.
-3. 360도 스윙 벡터 타임라인 록인 (360° Timeline Lock-in):
+1. 데이터 노이즈 및 가짜 객체 필터링 (Distance & Confidence Filter):
+   - AI가 배경의 구조물을 클럽 헤드로 오인하는 현상을 막기 위해, 손목 좌표로부터 
+     일정 거리(Max Distance)를 벗어난 객체는 철저히 배제함. 신뢰도(Conf) 0.5 이상만 채택.
+2. 360도 스윙 벡터 타임라인 록인 (360° Timeline Lock-in):
    - P1(90°), P4(Lt Arm 0°), P6(315°), P9(135°), P10(180°), P11(Rt Arm 180°) 등 
      기하학적 벡터 체계를 엄격한 탐색 구간 내에서 완벽하게 매핑함.
+3. P1 고정 가상 지면선 (Fixed Virtual Ground):
+   - P1 시점의 양발목 좌표를 전체 프레임의 영구적인 수평 기준으로 삼음.
 ================================================================================
 """
 
@@ -25,7 +24,7 @@ from ultralytics import YOLO
 
 st.set_page_config(page_title="P1-P13 Perfect Sync Analyzer", layout="wide")
 st.title("⛳ 골프 스윙 P1~P13 무결점 스캔 및 정밀 오버레이 시스템")
-st.markdown("노이즈 필터링을 통해 앵커 쏠림 현상을 완벽히 해결하고, 미세조정 시 신뢰도 기반 정밀 오버레이를 제공합니다.")
+st.markdown("물리적 거리 필터링을 통해 배경 구조물 오인식을 원천 차단하고 정밀한 각도를 산출합니다.")
 
 @st.cache_resource
 def load_models():
@@ -90,7 +89,7 @@ if uploaded_file:
         st.session_state.current_file_name = uploaded_file.name
 
     if 'auto_frames' not in st.session_state:
-        with st.spinner("240장 전수 DB 구축 및 노이즈 필터링 적용 중..."):
+        with st.spinner("240장 전수 DB 구축 및 물리적 노이즈 필터링 적용 중..."):
             tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
             tfile.write(uploaded_file.read())
             frame_dir = tempfile.mkdtemp()
@@ -103,11 +102,12 @@ if uploaded_file:
             db_records = []
             p1_ground = None 
             
-            # P1 고정 지면선 확보
             temp_cap = cv2.VideoCapture(tfile.name)
             ret, first_frame = temp_cap.read()
             if ret:
                 h_img, w_img, _ = first_frame.shape
+                MAX_CLUB_DIST = w_img * 0.4  # 💡 손목에서 클럽까지 허용하는 최대 픽셀 거리 (화면 폭의 40%)
+                
                 p_res_first = pose_model(first_frame, verbose=False)[0]
                 if p_res_first.keypoints is not None and len(p_res_first.keypoints.xy) > 0:
                     kpts_f = p_res_first.keypoints.xy[0].cpu().numpy()
@@ -117,8 +117,8 @@ if uploaded_file:
                     p1_ground = ((int(w_img * 0.35), int(h_img * 0.85)), (int(w_img * 0.65), int(h_img * 0.85)))
             temp_cap.release()
             st.session_state.fixed_ground = p1_ground
+            st.session_state.max_dist = MAX_CLUB_DIST
 
-            # 전수 스캔 수행
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret or total_frames > 600: break
@@ -137,7 +137,6 @@ if uploaded_file:
                     conf = p_res.keypoints.conf[0].cpu().numpy() if p_res.keypoints.conf is not None else np.ones(len(kpts))
                     
                     if len(kpts) > 10:
-                        # 신뢰도 기반 손목 좌표 안정화
                         if kpts[9][0] > 0 and conf[9] > 0.4: ly = kpts[9][1]
                         if kpts[10][0] > 0 and conf[10] > 0.4: ry = kpts[10][1]
                         
@@ -153,16 +152,23 @@ if uploaded_file:
                         if pts:
                             wrist_pt = (int(np.mean([p[0] for p in pts])), int(np.mean([p[1] for p in pts])))
                             shaft_boxes, head_boxes = [], []
+                            
+                            # 💡 [핵심 보정] 신뢰도(0.5 이상) 및 손목과의 물리적 거리(MAX_CLUB_DIST) 동시 필터링
                             for box in c_res.boxes:
+                                c = float(box.conf[0])
+                                if c < 0.5: continue # 신뢰도 낮은 객체 무시
+                                
                                 name = c_res.names[int(box.cls[0])]
                                 cent = (int((box.xyxy[0][0]+box.xyxy[0][2])/2), int((box.xyxy[0][1]+box.xyxy[0][3])/2))
-                                c = float(box.conf[0])
-                                if name == 'shaft': shaft_boxes.append((cent, c))
-                                elif name == 'head': head_boxes.append((cent, c))
+                                dist = math.hypot(cent[0] - wrist_pt[0], cent[1] - wrist_pt[1])
+                                
+                                if dist < MAX_CLUB_DIST:
+                                    if name == 'shaft': shaft_boxes.append((cent, c))
+                                    elif name == 'head': head_boxes.append((cent, c))
                             
                             target_pt = None
-                            if shaft_boxes: target_pt = max(shaft_boxes, key=lambda x: x[1])[0]
-                            elif head_boxes: target_pt = max(head_boxes, key=lambda x: x[1])[0]
+                            if head_boxes: target_pt = max(head_boxes, key=lambda x: x[1])[0] # 헤드를 최우선으로 추적
+                            elif shaft_boxes: target_pt = max(shaft_boxes, key=lambda x: x[1])[0]
                             
                             if target_pt:
                                 sa = compute_relative_angle(wrist_pt, target_pt, p1_ground[0], p1_ground[1])
@@ -179,31 +185,24 @@ if uploaded_file:
             cap.release()
             
             df_db = pd.DataFrame(db_records)
-            
-            # 💡 [핵심] 이상치 방지용 데이터 스무딩 (노이즈 필터링)
             df_db['LeftHandY_Smooth'] = df_db['LeftHandY'].rolling(window=5, min_periods=1, center=True).median()
             df_db['RightHandY_Smooth'] = df_db['RightHandY'].rolling(window=5, min_periods=1, center=True).median()
             st.session_state.df_db = df_db
             
-            # 💡 [핵심] 앵커 쏠림 원천 차단 (제한적 구간 탐색)
             valid_ly = df_db.dropna(subset=['LeftHandY_Smooth'])
             p1_idx = int(valid_ly.iloc[0]['Frame']) if not valid_ly.empty else 0
             
-            # P5 (탑) : 초반 60% 프레임 이내에서 검색
             sub_p5 = valid_ly[valid_ly['Frame'] < total_frames * 0.6]
             p5_idx = int(sub_p5.loc[sub_p5['LeftHandY_Smooth'].idxmin()]['Frame']) if not sub_p5.empty else total_frames // 4
             
-            # P8 (임팩트) : P5 이후 60프레임 내에서 최저점 검색
             sub_after_p5 = valid_ly[valid_ly['Frame'] > p5_idx].head(60)
             p8_idx = int(sub_after_p5.loc[sub_after_p5['LeftHandY_Smooth'].idxmax()]['Frame']) if not sub_after_p5.empty else p5_idx + 30
             
-            # P12 (피니시 진입) : P8 이후 검색
             valid_ry = df_db.dropna(subset=['RightHandY_Smooth'])
             sub_after_p8 = valid_ry[valid_ry['Frame'] > p8_idx]
             p12_idx = int(sub_after_p8.loc[sub_after_p8['RightHandY_Smooth'].idxmin()]['Frame']) if not sub_after_p8.empty else total_frames - 20
             p13_idx = min(total_frames - 1, p12_idx + 30)
 
-            # 세부 페이즈 정밀 매핑 (안전하게 갇힌 구간 내 탐색)
             auto_f = {}
             auto_f["P1"] = p1_idx
             auto_f["P2"] = find_best_frame_from_db(df_db, 'ShaftAngle', 45.0, p1_idx, p5_idx)
@@ -231,6 +230,7 @@ if uploaded_file:
         cols = st.columns(4)
         analysis_data = []
         fixed_ground = st.session_state.fixed_ground
+        max_dist = st.session_state.max_dist
 
         for i, p in enumerate(phases_info):
             with cols[i % 4]:
@@ -253,7 +253,6 @@ if uploaded_file:
                     cv2.line(img, fixed_ground[0], fixed_ground[1], (0, 0, 255), 4)
                     cv2.putText(img, "Fixed Ground", (fixed_ground[0][0], fixed_ground[0][1]+30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                     
-                    # 💡 [핵심 보정] 신뢰도가 높은 관절과 객체만 선별 매칭
                     wrist_pt, target_pt = None, None
                     if kpts is not None and len(kpts) > 10:
                         pts = []
@@ -261,16 +260,21 @@ if uploaded_file:
                         if kpts[10][0] > 0 and conf[10] > 0.4: pts.append(kpts[10])
                         if pts: wrist_pt = (int(np.mean([p[0] for p in pts])), int(np.mean([p[1] for p in pts])))
                     
-                    shaft_boxes, head_boxes = [], []
-                    for box in c_res.boxes:
-                        name = c_res.names[int(box.cls[0])]
-                        cent = (int((box.xyxy[0][0]+box.xyxy[0][2])/2), int((box.xyxy[0][1]+box.xyxy[0][3])/2))
-                        c = float(box.conf[0])
-                        if name == 'shaft': shaft_boxes.append((cent, c))
-                        elif name == 'head': head_boxes.append((cent, c))
-                    
-                    if shaft_boxes: target_pt = max(shaft_boxes, key=lambda x: x[1])[0]
-                    elif head_boxes: target_pt = max(head_boxes, key=lambda x: x[1])[0]
+                    if wrist_pt:
+                        shaft_boxes, head_boxes = [], []
+                        for box in c_res.boxes:
+                            c = float(box.conf[0])
+                            if c < 0.5: continue
+                            name = c_res.names[int(box.cls[0])]
+                            cent = (int((box.xyxy[0][0]+box.xyxy[0][2])/2), int((box.xyxy[0][1]+box.xyxy[0][3])/2))
+                            dist = math.hypot(cent[0] - wrist_pt[0], cent[1] - wrist_pt[1])
+                            
+                            if dist < max_dist:
+                                if name == 'shaft': shaft_boxes.append((cent, c))
+                                elif name == 'head': head_boxes.append((cent, c))
+                        
+                        if head_boxes: target_pt = max(head_boxes, key=lambda x: x[1])[0]
+                        elif shaft_boxes: target_pt = max(shaft_boxes, key=lambda x: x[1])[0]
 
                     if p['type'] == 'shaft' and wrist_pt and target_pt:
                         cv2.circle(img, wrist_pt, 8, (0, 255, 255), -1)
