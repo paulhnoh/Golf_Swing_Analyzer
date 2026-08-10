@@ -1,14 +1,15 @@
 """
 ================================================================================
 [절대 준수 원칙 - 시스템 설계 철학 및 분석 파이프라인 (변경 불가)]
-1. 데이터 노이즈 및 가짜 객체 필터링 (Distance & Confidence Filter):
-   - AI가 배경의 구조물을 클럽 헤드로 오인하는 현상을 막기 위해, 손목 좌표로부터 
-     일정 거리(Max Distance)를 벗어난 객체는 철저히 배제함. 신뢰도(Conf) 0.5 이상만 채택.
-2. 360도 스윙 벡터 타임라인 록인 (360° Timeline Lock-in):
-   - P1(90°), P4(Lt Arm 0°), P6(315°), P9(135°), P10(180°), P11(Rt Arm 180°) 등 
-     기하학적 벡터 체계를 엄격한 탐색 구간 내에서 완벽하게 매핑함.
-3. P1 고정 가상 지면선 (Fixed Virtual Ground):
-   - P1 시점의 양발목 좌표를 전체 프레임의 영구적인 수평 기준으로 삼음.
+1. 360도 스윙 벡터 타임라인 완벽 록인 (Math Correction Applied):
+   - Left=180°, Down=90°, Right=0°, Up=270° 체계를 수학적으로 완벽히 수정 반영.
+   - P1 ➔ P5 ➔ P8 ➔ P12의 대구간 내에서 각 페이즈가 정확한 프레임으로 분산되도록 보장.
+2. 실시간 다이나믹 오버레이 (Dynamic Real-time Overlay):
+   - 슬라이더 조정 시, 해당 프레임의 이미지를 즉시 로드하여 신뢰도 기반의 
+     샤프트/팔 오버레이와 각도 텍스트를 실시간으로 재계산하여 화면에 렌더링함.
+3. 모션 블러 대비 인식 반경 대폭 확장 (Max Distance Expand):
+   - P9, P10 구간의 빠른 속도(잔상)에 대응하기 위해 객체 인식 허용 반경을 확장하고 
+     헤드 누락 시 샤프트를 1순위로 연결하여 궤적을 잃지 않도록 함.
 ================================================================================
 """
 
@@ -22,9 +23,9 @@ import tempfile
 from PIL import Image
 from ultralytics import YOLO
 
-st.set_page_config(page_title="P1-P13 Perfect Sync Analyzer", layout="wide")
-st.title("⛳ 골프 스윙 P1~P13 무결점 스캔 및 정밀 오버레이 시스템")
-st.markdown("물리적 거리 필터링을 통해 배경 구조물 오인식을 원천 차단하고 정밀한 각도를 산출합니다.")
+st.set_page_config(page_title="P1-P13 Dynamic Master Analyzer", layout="wide")
+st.title("⛳ 골프 스윙 P1~P13 다이나믹 정밀 분석 시스템")
+st.markdown("프레임 쏠림 현상을 완벽히 해결하고, 미세조정 시 오버레이가 실시간으로 반응합니다.")
 
 @st.cache_resource
 def load_models():
@@ -32,23 +33,31 @@ def load_models():
 
 pose_model, custom_model = load_models()
 
+# 대표님의 다이어그램에 완벽하게 일치시킨 목표 각도 체계
 phases_info = [
     {"phase": "P1", "name": "Address", "desc": "샤프트 지면 수직", "target_angle": 90.0, "type": "shaft"},
     {"phase": "P2", "name": "Start Sweep", "desc": "샤프트 45°", "target_angle": 45.0, "type": "shaft"},
-    {"phase": "P3", "name": "Back Alignment", "desc": "샤프트 좌측 수평", "target_angle": 0.0, "type": "shaft"},
-    {"phase": "P4", "name": "Start Shoulder Back", "desc": "왼팔 좌측 수평", "target_angle": 0.0, "type": "arm_left"},
+    {"phase": "P3", "name": "Back Alignment", "desc": "샤프트 우측 수평", "target_angle": 0.0, "type": "shaft"},
+    {"phase": "P4", "name": "Start Shoulder Back", "desc": "왼팔 우측 수평", "target_angle": 0.0, "type": "arm_left"},
     {"phase": "P5", "name": "Backswing Top", "desc": "왼손 최고점 (탑)", "target_angle": None, "type": "top"},
     {"phase": "P6", "name": "Transition", "desc": "샤프트 다운스윙 315°", "target_angle": 315.0, "type": "shaft"},
-    {"phase": "P7", "name": "DB Alignment", "desc": "샤프트 좌측 수평", "target_angle": 0.0, "type": "shaft"},
+    {"phase": "P7", "name": "DB Alignment", "desc": "샤프트 우측 수평", "target_angle": 0.0, "type": "shaft"},
     {"phase": "P8", "name": "Impact", "desc": "볼 타격 (최저점)", "target_angle": None, "type": "impact"},
     {"phase": "P9", "name": "Lowest Club Head", "desc": "샤프트 릴리스 135°", "target_angle": 135.0, "type": "shaft"},
-    {"phase": "P10", "name": "DF Alignment", "desc": "샤프트 우측 수평", "target_angle": 180.0, "type": "shaft"},
-    {"phase": "P11", "name": "Start Shoulder Forward", "desc": "오른팔 우측 수평", "target_angle": 180.0, "type": "arm_right"},
+    {"phase": "P10", "name": "DF Alignment", "desc": "샤프트 좌측 수평", "target_angle": 180.0, "type": "shaft"},
+    {"phase": "P11", "name": "Start Shoulder Forward", "desc": "오른팔 좌측 수평", "target_angle": 180.0, "type": "arm_right"},
     {"phase": "P12", "name": "Downswing Top", "desc": "오른손 최고점 (피니시 진입)", "target_angle": None, "type": "top"},
     {"phase": "P13", "name": "Finish", "desc": "스윙 종료 정지", "target_angle": None, "type": "finish"},
 ]
 
+def calculate_peak_duration(y_coords, fps=30, threshold=10.0):
+    valid_y = [y for y in y_coords if not np.isnan(y)]
+    if not valid_y: return 0.0
+    peak_y = min(valid_y) 
+    return round(len([y for y in valid_y if abs(y - peak_y) <= threshold]) / fps, 3)
+
 def compute_relative_angle(p1, p2, ground_p1, ground_p2):
+    """지면선 기준 상대 각도 산출 (Right=0, Down=90, Left=180, Up=270)"""
     if ground_p1[0] > ground_p2[0]:
         ground_p1, ground_p2 = ground_p2, ground_p1
         
@@ -61,10 +70,11 @@ def compute_relative_angle(p1, p2, ground_p1, ground_p2):
     
     cos_t = math.cos(-ground_tilt)
     sin_t = math.sin(-ground_tilt)
+    # 💡 수학적 오류 수정: -rx 제거하여 좌/우(Left/Right) 반전 오류 해결
     rx = dx * cos_t - dy * sin_t
     ry = dx * sin_t + dy * cos_t
     
-    angle = math.degrees(math.atan2(ry, -rx))
+    angle = math.degrees(math.atan2(ry, rx))
     if angle < 0: angle += 360
     return round(angle, 1)
 
@@ -89,7 +99,7 @@ if uploaded_file:
         st.session_state.current_file_name = uploaded_file.name
 
     if 'auto_frames' not in st.session_state:
-        with st.spinner("240장 전수 DB 구축 및 물리적 노이즈 필터링 적용 중..."):
+        with st.spinner("240장 전수 DB 구축 및 벡터 각도 매핑 수행 중..."):
             tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
             tfile.write(uploaded_file.read())
             frame_dir = tempfile.mkdtemp()
@@ -106,7 +116,7 @@ if uploaded_file:
             ret, first_frame = temp_cap.read()
             if ret:
                 h_img, w_img, _ = first_frame.shape
-                MAX_CLUB_DIST = w_img * 0.4  # 💡 손목에서 클럽까지 허용하는 최대 픽셀 거리 (화면 폭의 40%)
+                MAX_CLUB_DIST = w_img * 0.7  # 💡 P9, P10 확장을 위해 허용 거리 대폭 증가 (화면의 70%)
                 
                 p_res_first = pose_model(first_frame, verbose=False)[0]
                 if p_res_first.keypoints is not None and len(p_res_first.keypoints.xy) > 0:
@@ -153,10 +163,9 @@ if uploaded_file:
                             wrist_pt = (int(np.mean([p[0] for p in pts])), int(np.mean([p[1] for p in pts])))
                             shaft_boxes, head_boxes = [], []
                             
-                            # 💡 [핵심 보정] 신뢰도(0.5 이상) 및 손목과의 물리적 거리(MAX_CLUB_DIST) 동시 필터링
                             for box in c_res.boxes:
                                 c = float(box.conf[0])
-                                if c < 0.5: continue # 신뢰도 낮은 객체 무시
+                                if c < 0.4: continue
                                 
                                 name = c_res.names[int(box.cls[0])]
                                 cent = (int((box.xyxy[0][0]+box.xyxy[0][2])/2), int((box.xyxy[0][1]+box.xyxy[0][3])/2))
@@ -167,7 +176,7 @@ if uploaded_file:
                                     elif name == 'head': head_boxes.append((cent, c))
                             
                             target_pt = None
-                            if head_boxes: target_pt = max(head_boxes, key=lambda x: x[1])[0] # 헤드를 최우선으로 추적
+                            if head_boxes: target_pt = max(head_boxes, key=lambda x: x[1])[0] 
                             elif shaft_boxes: target_pt = max(shaft_boxes, key=lambda x: x[1])[0]
                             
                             if target_pt:
@@ -189,10 +198,11 @@ if uploaded_file:
             df_db['RightHandY_Smooth'] = df_db['RightHandY'].rolling(window=5, min_periods=1, center=True).median()
             st.session_state.df_db = df_db
             
+            # 💡 [핵심] 앵커 프레임 쏠림 원천 차단 (논리적 분할)
             valid_ly = df_db.dropna(subset=['LeftHandY_Smooth'])
             p1_idx = int(valid_ly.iloc[0]['Frame']) if not valid_ly.empty else 0
             
-            sub_p5 = valid_ly[valid_ly['Frame'] < total_frames * 0.6]
+            sub_p5 = valid_ly[valid_ly['Frame'] < total_frames * 0.5]
             p5_idx = int(sub_p5.loc[sub_p5['LeftHandY_Smooth'].idxmin()]['Frame']) if not sub_p5.empty else total_frames // 4
             
             sub_after_p5 = valid_ly[valid_ly['Frame'] > p5_idx].head(60)
@@ -201,7 +211,15 @@ if uploaded_file:
             valid_ry = df_db.dropna(subset=['RightHandY_Smooth'])
             sub_after_p8 = valid_ry[valid_ry['Frame'] > p8_idx]
             p12_idx = int(sub_after_p8.loc[sub_after_p8['RightHandY_Smooth'].idxmin()]['Frame']) if not sub_after_p8.empty else total_frames - 20
-            p13_idx = min(total_frames - 1, p12_idx + 30)
+            
+            # P13 멈춤 감지 로직
+            sub_p13 = valid_ly[valid_ly['Frame'] > p12_idx]
+            p13_idx = total_frames - 1
+            for i in range(len(sub_p13) - 5):
+                window = sub_p13.iloc[i:i+5]
+                if window['LeftHandY_Smooth'].var() < 2.0:
+                    p13_idx = int(window.iloc[0]['Frame'])
+                    break
 
             auto_f = {}
             auto_f["P1"] = p1_idx
@@ -220,13 +238,16 @@ if uploaded_file:
             auto_f["P12"] = p12_idx
             auto_f["P13"] = p13_idx
 
+            st.session_state.p5_time = calculate_peak_duration(df_db['LeftHandY'][:p8_idx], fps)
+            st.session_state.p12_time = calculate_peak_duration(df_db['RightHandY'][p8_idx:], fps)
             st.session_state.auto_frames = auto_f
             st.session_state.total_frames = total_frames
             st.session_state.fps = fps
             st.session_state.scan_done = True
 
+    # 💡 다이나믹 오버레이 블록: 슬라이더를 1단위로 움직여도 즉시 재계산되어 그려짐
     if 'scan_done' in st.session_state:
-        st.subheader("📸 최고 신뢰도 기반 실시간 미세조정 검증 뷰")
+        st.subheader("📸 실시간 다이나믹 미세조정 뷰 (프레임 변경 시 즉각 반영)")
         cols = st.columns(4)
         analysis_data = []
         fixed_ground = st.session_state.fixed_ground
@@ -236,6 +257,7 @@ if uploaded_file:
             with cols[i % 4]:
                 phase_id = p['phase']
                 auto_fn = st.session_state.auto_frames.get(phase_id, 0)
+                # 슬라이더 값 변경 즉시 아래 로직이 재실행되어 화면에 다이나믹하게 렌더링됨
                 fn = st.slider(f"[{phase_id}] 조정", 0, st.session_state.total_frames-1, auto_fn, key=f"slider_{phase_id}")
                 
                 img_path = os.path.join(st.session_state.frame_dir, f"frame_{fn:04d}.jpg")
@@ -264,7 +286,7 @@ if uploaded_file:
                         shaft_boxes, head_boxes = [], []
                         for box in c_res.boxes:
                             c = float(box.conf[0])
-                            if c < 0.5: continue
+                            if c < 0.4: continue
                             name = c_res.names[int(box.cls[0])]
                             cent = (int((box.xyxy[0][0]+box.xyxy[0][2])/2), int((box.xyxy[0][1]+box.xyxy[0][3])/2))
                             dist = math.hypot(cent[0] - wrist_pt[0], cent[1] - wrist_pt[1])
@@ -313,7 +335,7 @@ if uploaded_file:
                 })
 
         st.divider()
-        st.subheader("📊 벡터 궤적 분석 및 정밀 검증 결과 표")
+        st.subheader("📊 실시간 다이나믹 검증 결과 표")
         df = pd.DataFrame(analysis_data)
         st.dataframe(df, use_container_width=True, hide_index=True)
 
