@@ -2,15 +2,13 @@
 ================================================================================
 [절대 준수 원칙 - 시스템 설계 철학 및 분석 파이프라인 (변경 불가)]
 1. 240장 개별 이미지 전수 조사 (Full Frame-by-Frame Scan):
-   - 영상의 모든 프레임을 temp 디렉토리에 개별 JPG 이미지로 완벽히 분리 저장한 후, 
-     1장도 빠짐없이 순회하며 샤프트와 팔 각도를 전수 계산하여 데이터베이스화함.
-2. 가상 지면선 정의 및 붉은색 오버레이 (Virtual Ground Line in Red):
-   - 왼발목과 오른발목 좌표를 연결한 선을 '가상 지면선'으로 정의하고, 이미지 상에 
-     '붉은색 라인'으로 오버레이하여 초록색 샤프트/팔 라인과 즉시 비교 가능하게 함.
-3. 엄격한 근사치 검색 및 자체 검증:
-   - 페이즈 정의(수직 90°, 45°, 수평 0° 등)에 가장 근사한 프레임을 전수 데이터에서 검색함.
-4. 풀 프레임 뷰 보장:
-   - 클럽과 공이 잘리지 않도록 원본 전체 뷰(Full-Frame)를 유지함.
+   - 1장도 빠짐없이 모든 프레임을 물리적 JPG로 저장하고 샤프트/팔 각도를 전수 계산함.
+2. P1 기준 고정 가상 지면선 (Fixed Virtual Ground from P1):
+   - P1 Address 시점의 양발목 좌표를 기준으로 '고정 지면선'을 생성하고, P1~P13 전체에 공통 적용함.
+3. 샤프트 및 팔 밀착 오버레이 (Shaft & Arm Aligned Overlay):
+   - P1~P3, P6~P10은 샤프트와 동일 방향으로 녹색 라인 밀착, P4는 Lt Arm, P11은 Rt Arm 오버레이.
+4. 엄격한 근사치 검색 및 자체 검증:
+   - 페이즈 정의(P9: 315°, P10: 270° 등)에 부합하는 프레임을 정확히 탐색함.
 ================================================================================
 """
 
@@ -24,9 +22,9 @@ import tempfile
 from PIL import Image
 from ultralytics import YOLO
 
-st.set_page_config(page_title="P1-P13 Red-Ground Pro Analyzer", layout="wide")
-st.title("⛳ 골프 스윙 P1~P13 붉은색 가상 지면선 대조 분석 시스템")
-st.markdown("양발을 잇는 붉은색 가상 지면선과 초록색 샤프트/팔 라인을 오버레이하여 직관적으로 비교합니다.")
+st.set_page_config(page_title="P1-P13 Master Pro Analyzer", layout="wide")
+st.title("⛳ 골프 스윙 P1~P13 마스터 정밀 분석 시스템")
+st.markdown("P1 기준 고정 지면선, 샤프트 밀착 오버레이, Lt/Rt Arm 표기 및 지능형 프레임 탐지 적용")
 
 @st.cache_resource
 def load_models():
@@ -44,7 +42,7 @@ phases_info = [
     {"phase": "P7", "name": "DB Alignment", "desc": "샤프트 지면과 평행 (0°)", "target_angle": 0.0, "type": "shaft"},
     {"phase": "P8", "name": "Impact", "desc": "볼 타격 시점", "target_angle": None, "type": "impact"},
     {"phase": "P9", "name": "Lowest Club Head", "desc": "샤프트 지면과 315°", "target_angle": 315.0, "type": "shaft"},
-    {"phase": "P10", "name": "DF Alignment", "desc": "샤프트 지면과 평행 (0°)", "target_angle": 0.0, "type": "shaft"},
+    {"phase": "P10", "name": "DF Alignment", "desc": "샤프트 지면과 평행 (270°)", "target_angle": 270.0, "type": "shaft"},
     {"phase": "P11", "name": "Start Shoulder Forward", "desc": "오른팔 지면과 평행 (0°)", "target_angle": 0.0, "type": "arm_right"},
     {"phase": "P12", "name": "Downswing Top", "desc": "오른손 최고점 (체공시간 측정)", "target_angle": None, "type": "top"},
     {"phase": "P13", "name": "Finish", "desc": "스윙 종료 정지 상태", "target_angle": None, "type": "finish"},
@@ -66,15 +64,15 @@ def compute_relative_angle(p1, p2, ground_p1, ground_p2):
     target_angle = math.degrees(math.atan2(dy, dx))
     
     rel_angle = target_angle - ground_angle
-    while rel_angle < 0: rel_angle += 180
-    while rel_angle >= 180: rel_angle -= 180
+    while rel_angle < 0: rel_angle += 360
+    while rel_angle >= 360: rel_angle -= 360
     return round(rel_angle, 1)
 
 def find_best_frame_by_angle(arr, target, start_idx, end_idx):
     if start_idx >= end_idx or start_idx >= len(arr): return start_idx
     sub_arr = arr[start_idx:end_idx]
     valid_indices = np.where(~np.isnan(sub_arr))[0]
-    if len(valid_indices) == 0: return start_idx + (end_idx - start_idx)//2
+    if len(valid_indices) == 0: return start_idx + max(1, (end_idx - start_idx)//4)
     
     diffs = np.abs(np.array(sub_arr)[valid_indices] - target)
     return start_idx + valid_indices[np.argmin(diffs)]
@@ -87,7 +85,7 @@ if uploaded_file:
         st.session_state.current_file_name = uploaded_file.name
 
     if 'auto_frames' not in st.session_state:
-        with st.spinner("240장 전수 스캔 중: 붉은색 지면선 기준 각도 분석 진행 중..."):
+        with st.spinner("240장 전수 스캔 및 P1 기준 고정 지면선 정밀 분석 중..."):
             tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
             tfile.write(uploaded_file.read())
             frame_dir = tempfile.mkdtemp()
@@ -98,7 +96,22 @@ if uploaded_file:
             total_frames = 0
             
             y_left, y_right, left_arm_angles, right_arm_angles, shaft_angles = [], [], [], [], []
+            p1_ground = None 
             
+            temp_cap = cv2.VideoCapture(tfile.name)
+            ret, first_frame = temp_cap.read()
+            if ret:
+                h_img, w_img, _ = first_frame.shape
+                p_res_first = pose_model(first_frame, verbose=False)[0]
+                if p_res_first.keypoints is not None and len(p_res_first.keypoints.xy) > 0:
+                    kpts_f = p_res_first.keypoints.xy[0].cpu().numpy()
+                    if len(kpts_f) > 16 and kpts_f[15][0] > 0 and kpts_f[16][0] > 0:
+                        p1_ground = ((int(kpts_f[15][0]), int(kpts_f[15][1])), (int(kpts_f[16][0]), int(kpts_f[16][1])))
+                if not p1_ground:
+                    p1_ground = ((int(w_img * 0.35), int(h_img * 0.85)), (int(w_img * 0.65), int(h_img * 0.85)))
+            temp_cap.release()
+            st.session_state.fixed_ground = p1_ground
+
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret or total_frames > 600: break
@@ -107,23 +120,14 @@ if uploaded_file:
                 cv2.imwrite(img_path, frame)
                 
                 analyzed_frame = cv2.imread(img_path)
-                h_img, w_img, _ = analyzed_frame.shape
-                
                 p_res = pose_model(analyzed_frame, verbose=False)[0]
                 c_res = custom_model(analyzed_frame, verbose=False)[0]
                 
                 ly, ry, la, ra, sa = np.nan, np.nan, np.nan, np.nan, np.nan
                 wrist_pt, target_pt = None, None
-                feet_ground = ((int(w_img * 0.35), int(h_img * 0.85)), (int(w_img * 0.65), int(h_img * 0.85))) # 기본 폴백 지면선
                 
                 if p_res.keypoints is not None and len(p_res.keypoints.xy) > 0:
                     kpts = p_res.keypoints.xy[0].cpu().numpy()
-                    if len(kpts) > 16:
-                        l_ankle = (int(kpts[15][0]), int(kpts[15][1])) if kpts[15][0] > 0 else None
-                        r_ankle = (int(kpts[16][0]), int(kpts[16][1])) if kpts[16][0] > 0 else None
-                        if l_ankle and r_ankle:
-                            feet_ground = (l_ankle, r_ankle)
-                    
                     if len(kpts) > 10:
                         if kpts[9][0] > 0: ly = kpts[9][1]
                         if kpts[10][0] > 0: ry = kpts[10][1]
@@ -131,20 +135,20 @@ if uploaded_file:
                             wrist_pt = (int((kpts[9][0]+kpts[10][0])/2), int((kpts[9][1]+kpts[10][1])/2))
                         
                         if kpts[5][0] > 0 and kpts[9][0] > 0:
-                            la = compute_relative_angle((kpts[5][0], kpts[5][1]), (kpts[9][0], kpts[9][1]), feet_ground[0], feet_ground[1])
+                            la = compute_relative_angle((kpts[5][0], kpts[5][1]), (kpts[9][0], kpts[9][1]), p1_ground[0], p1_ground[1])
                         if kpts[6][0] > 0 and kpts[10][0] > 0:
-                            ra = compute_relative_angle((kpts[6][0], kpts[6][1]), (kpts[10][0], kpts[10][1]), feet_ground[0], feet_ground[1])
+                            ra = compute_relative_angle((kpts[6][0], kpts[6][1]), (kpts[10][0], kpts[10][1]), p1_ground[0], p1_ground[1])
                 
                 if wrist_pt:
                     head, shaft = None, None
                     for box in c_res.boxes:
                         name = c_res.names[int(box.cls[0])]
                         cent = (int((box.xyxy[0][0]+box.xyxy[0][2])/2), int((box.xyxy[0][1]+box.xyxy[0][3])/2))
-                        if name == 'head': head = cent
-                        elif name == 'shaft': shaft = cent
-                    target_pt = head if head else shaft
+                        if name == 'shaft': shaft = cent
+                        elif name == 'head': head = cent
+                    target_pt = shaft if shaft else head
                     if target_pt:
-                        sa = compute_relative_angle(wrist_pt, target_pt, feet_ground[0], feet_ground[1])
+                        sa = compute_relative_angle(wrist_pt, target_pt, p1_ground[0], p1_ground[1])
                 
                 y_left.append(ly); y_right.append(ry)
                 left_arm_angles.append(la); right_arm_angles.append(ra); shaft_angles.append(sa)
@@ -164,14 +168,14 @@ if uploaded_file:
 
             auto_f = {"P1": p1_idx, "P5": p5_idx, "P8": p8_idx, "P12": p12_idx, "P13": p13_idx}
             
-            auto_f["P2"] = find_best_frame_by_angle(shaft_angles, 45.0, auto_f["P1"], auto_f["P5"])
-            auto_f["P3"] = find_best_frame_by_angle(shaft_angles, 0.0, auto_f["P2"], auto_f["P5"])
-            auto_f["P4"] = find_best_frame_by_angle(left_arm_angles, 0.0, auto_f["P3"], auto_f["P5"])
-            auto_f["P6"] = find_best_frame_by_angle(shaft_angles, 135.0, auto_f["P5"], auto_f["P8"])
-            auto_f["P7"] = find_best_frame_by_angle(shaft_angles, 0.0, auto_f["P6"], auto_f["P8"])
-            auto_f["P9"] = find_best_frame_by_angle(shaft_angles, 45.0, auto_f["P8"], auto_f["P12"])
-            auto_f["P10"] = find_best_frame_by_angle(shaft_angles, 0.0, auto_f["P9"], auto_f["P12"])
-            auto_f["P11"] = find_best_frame_by_angle(right_arm_angles, 0.0, auto_f["P10"], auto_f["P12"])
+            auto_f["P2"] = find_best_frame_by_angle(shaft_angles, 45.0, max(p1_idx+1, p1_idx), p5_idx)
+            auto_f["P3"] = find_best_frame_by_angle(shaft_angles, 0.0, auto_f["P2"], p5_idx)
+            auto_f["P4"] = find_best_frame_by_angle(left_arm_angles, 0.0, auto_f["P3"], p5_idx)
+            auto_f["P6"] = find_best_frame_by_angle(shaft_angles, 135.0, p5_idx, p8_idx)
+            auto_f["P7"] = find_best_frame_by_angle(shaft_angles, 0.0, auto_f["P6"], p8_idx)
+            auto_f["P9"] = find_best_frame_by_angle(shaft_angles, 315.0, p8_idx, p12_idx)
+            auto_f["P10"] = find_best_frame_by_angle(shaft_angles, 270.0, auto_f["P9"], p12_idx)
+            auto_f["P11"] = find_best_frame_by_angle(right_arm_angles, 0.0, auto_f["P10"], p12_idx)
 
             st.session_state.p5_time = calculate_peak_duration(y_left[:p8_idx], fps)
             st.session_state.p12_time = calculate_peak_duration(y_right[p8_idx:], fps)
@@ -182,9 +186,10 @@ if uploaded_file:
             st.session_state.scan_done = True
 
     if 'scan_done' in st.session_state:
-        st.subheader("📸 붉은색 가상 지면선 & 초록색 분석 라인 비교 뷰")
+        st.subheader("📸 P1 고정 지면선 & 밀착 오버레이 정밀 검증 뷰")
         cols = st.columns(4)
         analysis_data = []
+        fixed_ground = st.session_state.fixed_ground
 
         for i, p in enumerate(phases_info):
             with cols[i % 4]:
@@ -194,7 +199,6 @@ if uploaded_file:
                 
                 img_path = os.path.join(st.session_state.frame_dir, f"frame_{fn:04d}.jpg")
                 img = cv2.imread(img_path)
-                h_img, w_img, _ = img.shape
                 
                 measured_val = 0.0
                 verification_status = "Pass"
@@ -202,19 +206,10 @@ if uploaded_file:
                 if img is not None:
                     p_res = pose_model(img, verbose=False)[0]
                     c_res = custom_model(img, verbose=False)[0]
-                    
                     kpts = p_res.keypoints.xy[0].cpu().numpy() if (p_res.keypoints is not None and len(p_res.keypoints.xy) > 0) else None
-                    feet_ground = ((int(w_img * 0.35), int(h_img * 0.85)), (int(w_img * 0.65), int(h_img * 0.85)))
                     
-                    if kpts is not None and len(kpts) > 16:
-                        l_ankle = (int(kpts[15][0]), int(kpts[15][1])) if kpts[15][0] > 0 else None
-                        r_ankle = (int(kpts[16][0]), int(kpts[16][1])) if kpts[16][0] > 0 else None
-                        if l_ankle and r_ankle:
-                            feet_ground = (l_ankle, r_ankle)
-                    
-                    # 💡 [가상 지면선 오버레이] 양발목을 잇는 붉은색(Red) 라인 표시
-                    cv2.line(img, feet_ground[0], feet_ground[1], (0, 0, 255), 4)
-                    cv2.putText(img, "Virtual Ground (Red)", (feet_ground[0][0], feet_ground[0][1]+30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                    cv2.line(img, fixed_ground[0], fixed_ground[1], (0, 0, 255), 4)
+                    cv2.putText(img, "Fixed Ground (Red - P1)", (fixed_ground[0][0], fixed_ground[0][1]+30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                     
                     wrist_pt, target_pt = None, None
                     if kpts is not None and len(kpts) > 10 and kpts[9][0] > 0 and kpts[10][0] > 0:
@@ -224,16 +219,15 @@ if uploaded_file:
                     for box in c_res.boxes:
                         name = c_res.names[int(box.cls[0])]
                         cent = (int((box.xyxy[0][0]+box.xyxy[0][2])/2), int((box.xyxy[0][1]+box.xyxy[0][3])/2))
-                        if name == 'head': head = cent
-                        elif name == 'shaft': shaft = cent
-                    target_pt = head if head else shaft
+                        if name == 'shaft': shaft = cent
+                        elif name == 'head': head = cent
+                    target_pt = shaft if shaft else head
 
-                    # 💡 [분석 가이드라인 오버레이] 샤프트 및 팔의 초록색(Green) 라인 표시
                     if p['type'] == 'shaft' and wrist_pt and target_pt:
                         cv2.circle(img, wrist_pt, 8, (0, 255, 255), -1)
                         cv2.circle(img, target_pt, 8, (0, 0, 255), -1)
                         cv2.line(img, wrist_pt, target_pt, (0, 255, 0), 4)
-                        measured_val = compute_relative_angle(wrist_pt, target_pt, feet_ground[0], feet_ground[1])
+                        measured_val = compute_relative_angle(wrist_pt, target_pt, fixed_ground[0], fixed_ground[1])
                         cv2.putText(img, f"Shaft vs Ground: {measured_val}deg", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                     elif 'arm' in p['type'] and kpts is not None and len(kpts) > 10:
                         s_idx = 5 if 'left' in p['type'] else 6
@@ -242,15 +236,17 @@ if uploaded_file:
                             s_pt = (int(kpts[s_idx][0]), int(kpts[s_idx][1]))
                             w_pt = (int(kpts[w_idx][0]), int(kpts[w_idx][1]))
                             cv2.line(img, s_pt, w_pt, (0, 255, 0), 4)
-                            measured_val = compute_relative_angle(s_pt, w_pt, feet_ground[0], feet_ground[1])
-                            cv2.putText(img, f"Arm vs Ground: {measured_val}deg", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                            measured_val = compute_relative_angle(s_pt, w_pt, fixed_ground[0], fixed_ground[1])
+                            arm_label = "Rt Arm" if phase_id == "P11" else "Lt Arm"
+                            cv2.putText(img, f"{arm_label} vs Ground: {measured_val}deg", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
                     if p['target_angle'] is not None:
                         error = abs(measured_val - p['target_angle'])
                         if error > 15:
                             verification_status = "Check (Review)"
 
-                    st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption=f"[{phase_id}] {p['name']} ({verification_status})")
+                    display_name = f"[{phase_id}] {p['name']} ({verification_status})"
+                    st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption=display_name)
                 
                 head_still = 0.0
                 if phase_id == "P5": head_still = st.session_state.p5_time
@@ -269,7 +265,7 @@ if uploaded_file:
                 })
 
         st.divider()
-        st.subheader("📊 붉은색 지면선 기준 검증 결과 표")
+        st.subheader("📊 마스터 정밀 검증 결과 표")
         df = pd.DataFrame(analysis_data)
         st.dataframe(df, use_container_width=True, hide_index=True)
 
