@@ -1,16 +1,15 @@
 """
 ================================================================================
 [절대 준수 원칙 - 시스템 설계 철학 및 분석 파이프라인 (변경 불가)]
-1. 240장 전수 스캔 및 DB 구축 (Full Frame-by-Frame DB):
-   - 모든 프레임을 개별 이미지로 저장하고, 가상 지면선을 기준으로 각도를 전수 계산함.
-2. 360도 스윙 벡터 각도계 (360° Circular Angle System):
-   - Left=0°, Down=90°, Right=180°, Up=270° 체계를 도입하여 각 페이즈의 방향성을 완벽히 분리.
-   - P3/P7(0°), P6(315°), P9(135°), P10(180°) 등 스윙 흐름에 맞춘 기하학적 각도 할당.
-3. 타임라인 기반 구간 한정 검색 (Timeline Bounded Search):
-   - P1 ➔ P5(탑) ➔ P8(임팩트) ➔ P12(피니시 진입) 대구간을 선행 탐지하고, 
-     그 범위 내에서만 원형 각도 오차(Circular Diff)가 가장 적은 프레임을 추출.
-4. P1 고정 가상 지면선 (Fixed Virtual Ground):
-   - P1 시점의 양발목 좌표를 전체 프레임의 영구적인 수평 기준으로 삼음.
+1. 데이터 노이즈 필터링 (Rolling Median Smoothing):
+   - Pose 모델의 일시적 오류(좌표 튐 현상)로 인해 프레임이 한 곳(예: 162번)에 쏠리지 않도록, 
+     DB 구축 후 손목 좌표에 통계적 스무딩을 적용하여 완벽한 변곡점(P5, P8, P12)을 찾아냄.
+2. 최고 신뢰도 객체 매칭 (Max Confidence Tracking):
+   - 수동 프레임 미세조정 시 녹색 라인이 엉뚱한 곳으로 튀는 것을 막기 위해, 
+     감지된 박스 중 Confidence(신뢰도)가 가장 높은 객체만 엄격히 오버레이에 사용함.
+3. 360도 스윙 벡터 타임라인 록인 (360° Timeline Lock-in):
+   - P1(90°), P4(Lt Arm 0°), P6(315°), P9(135°), P10(180°), P11(Rt Arm 180°) 등 
+     기하학적 벡터 체계를 엄격한 탐색 구간 내에서 완벽하게 매핑함.
 ================================================================================
 """
 
@@ -24,9 +23,9 @@ import tempfile
 from PIL import Image
 from ultralytics import YOLO
 
-st.set_page_config(page_title="P1-P13 Master Vector Analyzer", layout="wide")
-st.title("⛳ 골프 스윙 P1~P13 마스터 벡터 정밀 분석 시스템")
-st.markdown("대표님의 360° 스윙 벡터 모델을 도입하여 P1~P13 싯점을 완벽히 매핑합니다.")
+st.set_page_config(page_title="P1-P13 Perfect Sync Analyzer", layout="wide")
+st.title("⛳ 골프 스윙 P1~P13 무결점 스캔 및 정밀 오버레이 시스템")
+st.markdown("노이즈 필터링을 통해 앵커 쏠림 현상을 완벽히 해결하고, 미세조정 시 신뢰도 기반 정밀 오버레이를 제공합니다.")
 
 @st.cache_resource
 def load_models():
@@ -34,7 +33,6 @@ def load_models():
 
 pose_model, custom_model = load_models()
 
-# 대표님의 다이어그램에 완벽하게 일치시킨 목표 각도 체계
 phases_info = [
     {"phase": "P1", "name": "Address", "desc": "샤프트 지면 수직", "target_angle": 90.0, "type": "shaft"},
     {"phase": "P2", "name": "Start Sweep", "desc": "샤프트 45°", "target_angle": 45.0, "type": "shaft"},
@@ -51,18 +49,7 @@ phases_info = [
     {"phase": "P13", "name": "Finish", "desc": "스윙 종료 정지", "target_angle": None, "type": "finish"},
 ]
 
-def calculate_peak_duration(y_coords, fps=30, threshold=10.0):
-    valid_y = [y for y in y_coords if not np.isnan(y)]
-    if not valid_y: return 0.0
-    peak_y = min(valid_y) 
-    return round(len([y for y in valid_y if abs(y - peak_y) <= threshold]) / fps, 3)
-
 def compute_relative_angle(p1, p2, ground_p1, ground_p2):
-    """
-    대표님의 좌표계 구현 (Left=0, Down=90, Right=180, Up=270)
-    지면선의 기울기를 보정한 후, 해당 체계로 각도를 산출합니다.
-    """
-    # X좌표 정렬 (항상 왼쪽에서 오른쪽으로 향하는 지면 벡터 생성)
     if ground_p1[0] > ground_p2[0]:
         ground_p1, ground_p2 = ground_p2, ground_p1
         
@@ -73,30 +60,24 @@ def compute_relative_angle(p1, p2, ground_p1, ground_p2):
     dx = p2[0] - p1[0]
     dy = p2[1] - p1[1]
     
-    # 지면 기울기(Tilt)만큼 회전시켜 수평을 맞춤
     cos_t = math.cos(-ground_tilt)
     sin_t = math.sin(-ground_tilt)
     rx = dx * cos_t - dy * sin_t
     ry = dx * sin_t + dy * cos_t
     
-    # Left(0), Down(90), Right(180), Up(270) 각도 체계 적용
     angle = math.degrees(math.atan2(ry, -rx))
     if angle < 0: angle += 360
     return round(angle, 1)
 
 def angle_diff(a, b):
-    """원형 각도 체계의 최소 오차 산출 (예: 359도와 1도의 차이는 2도)"""
     diff = abs(a - b) % 360
     return min(diff, 360 - diff)
 
 def find_best_frame_from_db(db_df, col_name, target_val, start_f, end_f):
-    """지정된 타임라인 구간 내에서 목표 각도와 가장 오차가 적은 프레임을 추출"""
     sub = db_df[(db_df['Frame'] >= start_f) & (db_df['Frame'] <= end_f)]
     if sub.empty: return start_f
     valid = sub.dropna(subset=[col_name])
     if valid.empty: return start_f
-    
-    # 원형 오차(angle_diff)를 적용하여 최소 오차 행 탐색
     diffs = valid[col_name].apply(lambda x: angle_diff(x, target_val))
     best_row = valid.loc[diffs.idxmin()]
     return int(best_row['Frame'])
@@ -109,7 +90,7 @@ if uploaded_file:
         st.session_state.current_file_name = uploaded_file.name
 
     if 'auto_frames' not in st.session_state:
-        with st.spinner("240장 전수 DB 구축 및 벡터 각도 탐색 중..."):
+        with st.spinner("240장 전수 DB 구축 및 노이즈 필터링 적용 중..."):
             tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
             tfile.write(uploaded_file.read())
             frame_dir = tempfile.mkdtemp()
@@ -122,7 +103,7 @@ if uploaded_file:
             db_records = []
             p1_ground = None 
             
-            # 1. P1 고정 지면선 확보
+            # P1 고정 지면선 확보
             temp_cap = cv2.VideoCapture(tfile.name)
             ret, first_frame = temp_cap.read()
             if ret:
@@ -137,7 +118,7 @@ if uploaded_file:
             temp_cap.release()
             st.session_state.fixed_ground = p1_ground
 
-            # 2. 240장 전수 스캔 및 DB(Dataframe) 저장
+            # 전수 스캔 수행
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret or total_frames > 600: break
@@ -153,26 +134,36 @@ if uploaded_file:
                 
                 if p_res.keypoints is not None and len(p_res.keypoints.xy) > 0:
                     kpts = p_res.keypoints.xy[0].cpu().numpy()
+                    conf = p_res.keypoints.conf[0].cpu().numpy() if p_res.keypoints.conf is not None else np.ones(len(kpts))
+                    
                     if len(kpts) > 10:
-                        if kpts[9][0] > 0: ly = kpts[9][1]
-                        if kpts[10][0] > 0: ry = kpts[10][1]
+                        # 신뢰도 기반 손목 좌표 안정화
+                        if kpts[9][0] > 0 and conf[9] > 0.4: ly = kpts[9][1]
+                        if kpts[10][0] > 0 and conf[10] > 0.4: ry = kpts[10][1]
                         
-                        # 팔 각도 (어깨 -> 손목)
                         if kpts[5][0] > 0 and kpts[9][0] > 0:
                             la = compute_relative_angle((kpts[5][0], kpts[5][1]), (kpts[9][0], kpts[9][1]), p1_ground[0], p1_ground[1])
                         if kpts[6][0] > 0 and kpts[10][0] > 0:
                             ra = compute_relative_angle((kpts[6][0], kpts[6][1]), (kpts[10][0], kpts[10][1]), p1_ground[0], p1_ground[1])
                         
-                        # 샤프트 각도 (양손 중앙 -> 클럽 헤드/샤프트)
-                        wrist_pt = (int((kpts[9][0]+kpts[10][0])/2), int((kpts[9][1]+kpts[10][1])/2)) if (kpts[9][0] > 0 and kpts[10][0] > 0) else None
-                        if wrist_pt:
-                            head, shaft = None, None
+                        pts = []
+                        if kpts[9][0] > 0 and conf[9] > 0.4: pts.append(kpts[9])
+                        if kpts[10][0] > 0 and conf[10] > 0.4: pts.append(kpts[10])
+                        
+                        if pts:
+                            wrist_pt = (int(np.mean([p[0] for p in pts])), int(np.mean([p[1] for p in pts])))
+                            shaft_boxes, head_boxes = [], []
                             for box in c_res.boxes:
                                 name = c_res.names[int(box.cls[0])]
                                 cent = (int((box.xyxy[0][0]+box.xyxy[0][2])/2), int((box.xyxy[0][1]+box.xyxy[0][3])/2))
-                                if name == 'shaft': shaft = cent
-                                elif name == 'head': head = cent
-                            target_pt = shaft if shaft else head
+                                c = float(box.conf[0])
+                                if name == 'shaft': shaft_boxes.append((cent, c))
+                                elif name == 'head': head_boxes.append((cent, c))
+                            
+                            target_pt = None
+                            if shaft_boxes: target_pt = max(shaft_boxes, key=lambda x: x[1])[0]
+                            elif head_boxes: target_pt = max(head_boxes, key=lambda x: x[1])[0]
+                            
                             if target_pt:
                                 sa = compute_relative_angle(wrist_pt, target_pt, p1_ground[0], p1_ground[1])
                 
@@ -188,21 +179,31 @@ if uploaded_file:
             cap.release()
             
             df_db = pd.DataFrame(db_records)
+            
+            # 💡 [핵심] 이상치 방지용 데이터 스무딩 (노이즈 필터링)
+            df_db['LeftHandY_Smooth'] = df_db['LeftHandY'].rolling(window=5, min_periods=1, center=True).median()
+            df_db['RightHandY_Smooth'] = df_db['RightHandY'].rolling(window=5, min_periods=1, center=True).median()
             st.session_state.df_db = df_db
             
-            # 3. 뼈대(Anchor) 구간 설정
-            valid_ly = df_db.dropna(subset=['LeftHandY'])
+            # 💡 [핵심] 앵커 쏠림 원천 차단 (제한적 구간 탐색)
+            valid_ly = df_db.dropna(subset=['LeftHandY_Smooth'])
             p1_idx = int(valid_ly.iloc[0]['Frame']) if not valid_ly.empty else 0
-            p5_idx = int(valid_ly.loc[valid_ly['LeftHandY'].idxmin()]['Frame']) if not valid_ly.empty else total_frames // 4
             
-            sub_ry = df_db.iloc[p5_idx:].dropna(subset=['RightHandY'])
-            p12_idx = int(sub_ry.loc[sub_ry['RightHandY'].idxmin()]['Frame']) if not sub_ry.empty else total_frames - 30
-            p13_idx = total_frames - 1
+            # P5 (탑) : 초반 60% 프레임 이내에서 검색
+            sub_p5 = valid_ly[valid_ly['Frame'] < total_frames * 0.6]
+            p5_idx = int(sub_p5.loc[sub_p5['LeftHandY_Smooth'].idxmin()]['Frame']) if not sub_p5.empty else total_frames // 4
             
-            sub_impact = df_db.loc[p5_idx:p12_idx].dropna(subset=['LeftHandY'])
-            p8_idx = int(sub_impact.loc[sub_impact['LeftHandY'].idxmax()]['Frame']) if not sub_impact.empty else (p5_idx + p12_idx) // 2
+            # P8 (임팩트) : P5 이후 60프레임 내에서 최저점 검색
+            sub_after_p5 = valid_ly[valid_ly['Frame'] > p5_idx].head(60)
+            p8_idx = int(sub_after_p5.loc[sub_after_p5['LeftHandY_Smooth'].idxmax()]['Frame']) if not sub_after_p5.empty else p5_idx + 30
+            
+            # P12 (피니시 진입) : P8 이후 검색
+            valid_ry = df_db.dropna(subset=['RightHandY_Smooth'])
+            sub_after_p8 = valid_ry[valid_ry['Frame'] > p8_idx]
+            p12_idx = int(sub_after_p8.loc[sub_after_p8['RightHandY_Smooth'].idxmin()]['Frame']) if not sub_after_p8.empty else total_frames - 20
+            p13_idx = min(total_frames - 1, p12_idx + 30)
 
-            # 4. 각 페이즈별 정밀 검색 (순서 역전 방지)
+            # 세부 페이즈 정밀 매핑 (안전하게 갇힌 구간 내 탐색)
             auto_f = {}
             auto_f["P1"] = p1_idx
             auto_f["P2"] = find_best_frame_from_db(df_db, 'ShaftAngle', 45.0, p1_idx, p5_idx)
@@ -220,15 +221,13 @@ if uploaded_file:
             auto_f["P12"] = p12_idx
             auto_f["P13"] = p13_idx
 
-            st.session_state.p5_time = calculate_peak_duration(df_db['LeftHandY'][:p8_idx], fps)
-            st.session_state.p12_time = calculate_peak_duration(df_db['RightHandY'][p8_idx:], fps)
             st.session_state.auto_frames = auto_f
             st.session_state.total_frames = total_frames
             st.session_state.fps = fps
             st.session_state.scan_done = True
 
     if 'scan_done' in st.session_state:
-        st.subheader("📸 벡터 각도 기반 정밀 오버레이 검증 뷰")
+        st.subheader("📸 최고 신뢰도 기반 실시간 미세조정 검증 뷰")
         cols = st.columns(4)
         analysis_data = []
         fixed_ground = st.session_state.fixed_ground
@@ -249,21 +248,29 @@ if uploaded_file:
                     p_res = pose_model(img, verbose=False)[0]
                     c_res = custom_model(img, verbose=False)[0]
                     kpts = p_res.keypoints.xy[0].cpu().numpy() if (p_res.keypoints is not None and len(p_res.keypoints.xy) > 0) else None
+                    conf = p_res.keypoints.conf[0].cpu().numpy() if p_res.keypoints is not None and p_res.keypoints.conf is not None else np.ones(17)
                     
                     cv2.line(img, fixed_ground[0], fixed_ground[1], (0, 0, 255), 4)
-                    cv2.putText(img, "Fixed Ground (P1)", (fixed_ground[0][0], fixed_ground[0][1]+30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                    cv2.putText(img, "Fixed Ground", (fixed_ground[0][0], fixed_ground[0][1]+30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                     
+                    # 💡 [핵심 보정] 신뢰도가 높은 관절과 객체만 선별 매칭
                     wrist_pt, target_pt = None, None
-                    if kpts is not None and len(kpts) > 10 and kpts[9][0] > 0 and kpts[10][0] > 0:
-                        wrist_pt = (int((kpts[9][0]+kpts[10][0])/2), int((kpts[9][1]+kpts[10][1])/2))
+                    if kpts is not None and len(kpts) > 10:
+                        pts = []
+                        if kpts[9][0] > 0 and conf[9] > 0.4: pts.append(kpts[9])
+                        if kpts[10][0] > 0 and conf[10] > 0.4: pts.append(kpts[10])
+                        if pts: wrist_pt = (int(np.mean([p[0] for p in pts])), int(np.mean([p[1] for p in pts])))
                     
-                    head, shaft = None, None
+                    shaft_boxes, head_boxes = [], []
                     for box in c_res.boxes:
                         name = c_res.names[int(box.cls[0])]
                         cent = (int((box.xyxy[0][0]+box.xyxy[0][2])/2), int((box.xyxy[0][1]+box.xyxy[0][3])/2))
-                        if name == 'shaft': shaft = cent
-                        elif name == 'head': head = cent
-                    target_pt = shaft if shaft else head
+                        c = float(box.conf[0])
+                        if name == 'shaft': shaft_boxes.append((cent, c))
+                        elif name == 'head': head_boxes.append((cent, c))
+                    
+                    if shaft_boxes: target_pt = max(shaft_boxes, key=lambda x: x[1])[0]
+                    elif head_boxes: target_pt = max(head_boxes, key=lambda x: x[1])[0]
 
                     if p['type'] == 'shaft' and wrist_pt and target_pt:
                         cv2.circle(img, wrist_pt, 8, (0, 255, 255), -1)
@@ -271,6 +278,7 @@ if uploaded_file:
                         cv2.line(img, wrist_pt, target_pt, (0, 255, 0), 4)
                         measured_val = compute_relative_angle(wrist_pt, target_pt, fixed_ground[0], fixed_ground[1])
                         cv2.putText(img, f"Shaft: {measured_val}deg", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    
                     elif 'arm' in p['type'] and kpts is not None and len(kpts) > 10:
                         s_idx = 5 if 'left' in p['type'] else 6
                         w_idx = 9 if 'left' in p['type'] else 10
@@ -283,17 +291,12 @@ if uploaded_file:
                             cv2.putText(img, f"{arm_label}: {measured_val}deg", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
                     if p['target_angle'] is not None:
-                        # 원형 오차(angle_diff)로 검증 수행
                         error = angle_diff(measured_val, p['target_angle'])
-                        if error > 20: # 허용 오차 20도
+                        if error > 20:
                             verification_status = "Check (Review)"
 
                     st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption=f"[{phase_id}] {p['name']} ({verification_status})")
                 
-                head_still = 0.0
-                if phase_id == "P5": head_still = st.session_state.p5_time
-                elif phase_id == "P12": head_still = st.session_state.p12_time
-
                 analysis_data.append({
                     "Phase": phase_id,
                     "Name": p['name'],
@@ -302,8 +305,7 @@ if uploaded_file:
                     "AI 측정 값": measured_val,
                     "검증 상태": verification_status,
                     "Frame #": fn,
-                    "Time Stamp(s)": round(fn / st.session_state.fps, 2),
-                    "HeadStill Time": head_still
+                    "Time Stamp(s)": round(fn / st.session_state.fps, 2)
                 })
 
         st.divider()
