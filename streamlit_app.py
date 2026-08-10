@@ -1,9 +1,3 @@
-# 1. 필수 라이브러리 설치
-!pip install -q streamlit ultralytics opencv-python-headless pillow numpy streamlit-image-coordinates yt-dlp
-!npm install -g localtunnel
-
-# 2. 통합 에디션 앱 코드 생성
-%%writefile app.py
 import streamlit as st
 import cv2
 import numpy as np
@@ -21,7 +15,7 @@ st.set_page_config(page_title="AI Golf Swing Analyzer", layout="wide")
 @st.cache_resource
 def load_models():
     pose_model = YOLO('yolov8n-pose.pt') 
-    custom_model = YOLO('runs/detect/custom_golf/weights/best.pt') 
+    custom_model = YOLO('custom_golf.pt') # 💡 GitHub에 best.pt를 custom_golf.pt로 이름 바꿔서 올리셨다면 이대로 유지하세요.
     return pose_model, custom_model
 
 pose_model, custom_model = load_models()
@@ -96,7 +90,7 @@ if video_path:
                 if np.isnan(wrist_ys).all():
                     st.error("영상에서 골퍼를 찾을 수 없습니다. 정면 스윙 영상인지 확인해주세요.")
                 else:
-                    # 임팩트 순간 (손목이 가장 낮게 내려온 프레임) 추출
+                    # 임팩트 순간 추출
                     impact_idx = int(np.nanargmax(wrist_ys))
                     impact_frame, lw, rw = frames[impact_idx]
                     
@@ -115,7 +109,7 @@ if video_path:
                             head_pt = (int((x1 + x2) / 2), int((y1 + y2) / 2))
                             break
                     
-                    # BGR을 웹용 RGB로 변환 후 세션에 저장
+                    # 세션에 저장
                     st.session_state.impact_img = cv2.cvtColor(impact_frame, cv2.COLOR_BGR2RGB)
                     st.session_state.wrist_pt = wrist_pt
                     st.session_state.head_pt = head_pt
@@ -130,7 +124,7 @@ if video_path:
 
             if wrist_pt and head_pt:
                 cv2.circle(draw_img, wrist_pt, 8, (0, 255, 255), -1)
-                cv2.circle(draw_img, head_pt, 8, (255, 0, 0), -1) # RGB 환경이므로 Red는 (255,0,0)
+                cv2.circle(draw_img, head_pt, 8, (255, 0, 0), -1) 
                 cv2.line(draw_img, wrist_pt, head_pt, (0, 255, 0), 4)
                 
                 dx = head_pt[0] - wrist_pt[0]
@@ -143,14 +137,13 @@ if video_path:
             col1, col2 = st.columns([2, 1])
             with col1:
                 st.subheader("📸 임팩트 자동 포착 & 수동 보정")
-                # 이미지 클릭 UI
                 value = streamlit_image_coordinates(Image.fromarray(draw_img), key="pil")
                 
                 if value is not None:
                     clicked_pt = (value['x'], value['y'])
                     if st.session_state.head_pt != clicked_pt:
                         st.session_state.head_pt = clicked_pt
-                        st.rerun() # 선 재계산 및 렌더링
+                        st.rerun() 
 
             with col2:
                 st.subheader("📊 역추적 데이터")
@@ -163,15 +156,3 @@ if video_path:
                     st.error("⚠️ AI가 헤드를 놓쳤습니다. 사진 속 헤드 위치를 클릭하세요.")
                     
                 st.write("💡 **전문가 미세조정(Expert UI):** AI가 추적한 빨간색 헤드 점의 위치가 미세하게 어긋났다면, 사진 속 실제 헤드 중심을 클릭하세요. 마우스를 따라 선이 즉시 보정됩니다.")
-
-# 3. 터널링 링크 생성 및 앱 구동
-import urllib
-import time
-
-ip_password = urllib.request.urlopen('https://ipv4.icanhazip.com').read().decode('utf8').strip("\n")
-print(f"🔑 [중요] 아래 링크 클릭 후 보안 화면에 입력할 IP 비밀번호: {ip_password}\n")
-
-get_ipython().system_raw('streamlit run app.py &>/content/logs.txt &')
-time.sleep(3)
-
-!npx localtunnel --port 8501
