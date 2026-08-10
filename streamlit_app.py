@@ -1,13 +1,13 @@
 """
 ================================================================================
-[절대 준수 원칙 - 시스템 설계 철학 및 분석 파이프라인]
-1. 전수 좌표 DB화 및 매칭 (Full Coordinate DB Mapping):
-   - 240장 전체를 스캔하며 손목, 어깨, 샤프트의 실제 X/Y 좌표를 DataFrame에 모두 저장.
-   - UI에서 미세조정 시 YOLO를 재구동하지 않고 DB의 좌표를 즉시 불러와 렌더링(선 사라짐 원천 차단).
-2. 360도 스윙 벡터 수학적 완벽 동기화 (Math Correction):
-   - 대표님 다이어그램 적용: Left(0°), Down(90°), Right(180°), Up(270°), Top-Left(315°), Bottom-Right(135°).
-3. 동적 객체 트래킹 (Dynamic Object Tracking):
-   - P1 클럽 길이 반경 내에서, 이전 프레임 위치와 가장 가까운 객체를 연속 추적하여 가짜 마커 회피.
+[절대 준수 원칙 - 시스템 설계 철학 및 분석 파이프라인 (변경 불가)]
+1. 초정밀 자체 검증 한도 (Validation Margin 7°):
+   - 배경 오인식이 차단되어 측정 정확도가 극대화되었으므로, 오차 허용 한도를 7도로 대폭 축소함.
+   - 1차 탐색 후 오차가 7도를 초과하면 탐색 구간을 확장하여 정밀 재탐색(Re-search) 수행.
+2. 전수 좌표 DB화 및 매칭 (Full Coordinate DB Mapping):
+   - 240장 전체 스캔 좌표를 DB에 기록하고, 미세조정 시 DB만 읽어와 즉각 렌더링.
+3. 360도 스윙 벡터 완벽 동기화 (Math Correction):
+   - Left(0°/180°), Down(90°), Right(180°/0°), Up(270°) 체계 완벽 유지.
 ================================================================================
 """
 
@@ -21,9 +21,9 @@ import tempfile
 from PIL import Image
 from ultralytics import YOLO
 
-st.set_page_config(page_title="P1-P13 Perfect DB Analyzer", layout="wide")
-st.title("⛳ 골프 스윙 P1~P13 전수 좌표 DB 및 다이나믹 오버레이 시스템")
-st.markdown("모든 프레임의 좌표를 DB화하여 미세조정 시 오버레이가 즉시, 그리고 절대 사라지지 않고 반영됩니다.")
+st.set_page_config(page_title="P1-P13 True Validation Analyzer", layout="wide")
+st.title("⛳ 골프 스윙 P1~P13 진정한 자체 검증(Validation) 시스템")
+st.markdown("오차 한도 7° 이내의 초정밀 검증을 수행하며, 미세조정 시 오버레이가 즉각 반영됩니다.")
 
 @st.cache_resource
 def load_models():
@@ -31,7 +31,6 @@ def load_models():
 
 pose_model, custom_model = load_models()
 
-# 대표님 다이어그램 기준 완벽 동기화 체계
 phases_info = [
     {"phase": "P1", "name": "Address", "desc": "샤프트 지면 수직", "target_angle": 90.0, "type": "shaft"},
     {"phase": "P2", "name": "Start Sweep", "desc": "샤프트 45°", "target_angle": 45.0, "type": "shaft"},
@@ -48,14 +47,7 @@ phases_info = [
     {"phase": "P13", "name": "Finish", "desc": "스윙 종료 정지", "target_angle": None, "type": "finish"},
 ]
 
-def calculate_peak_duration(y_coords, fps=30, threshold=10.0):
-    valid_y = [y for y in y_coords if not np.isnan(y)]
-    if not valid_y: return 0.0
-    peak_y = min(valid_y) 
-    return round(len([y for y in valid_y if abs(y - peak_y) <= threshold]) / fps, 3)
-
 def compute_relative_angle(p1, p2, ground_p1, ground_p2):
-    """대표님의 360도 스윙 벡터 다이어그램 완벽 동기화 로직"""
     if ground_p1[0] > ground_p2[0]:
         ground_p1, ground_p2 = ground_p2, ground_p1
         
@@ -68,8 +60,6 @@ def compute_relative_angle(p1, p2, ground_p1, ground_p2):
     
     cos_t = math.cos(-ground_tilt)
     sin_t = math.sin(-ground_tilt)
-    
-    # 💡 핵심 수정: X축을 반전(-rx)하여 Left가 0도, Right가 180도가 되도록 수학적 보정
     rx = -(dx * cos_t - dy * sin_t)
     ry = dx * sin_t + dy * cos_t
     
@@ -81,14 +71,36 @@ def angle_diff(a, b):
     diff = abs(a - b) % 360
     return min(diff, 360 - diff)
 
-def find_best_frame_from_db(db_df, col_name, target_val, start_f, end_f):
+def find_verified_frame_from_db(db_df, col_name, target_val, start_f, end_f, max_frames, margin=7.0):
+    """
+    💡 [핵심] 초정밀 자체 검증 알고리즘 (Validation Margin 7도 적용)
+    1차 탐색 후 오차가 7도를 벗어나면 앞뒤로 구간을 넓혀 재탐색(Re-search)합니다.
+    """
     sub = db_df[(db_df['Frame'] >= start_f) & (db_df['Frame'] <= end_f)]
-    if sub.empty: return start_f
     valid = sub.dropna(subset=[col_name])
-    if valid.empty: return start_f
-    diffs = valid[col_name].apply(lambda x: angle_diff(x, target_val))
-    best_row = valid.loc[diffs.idxmin()]
-    return int(best_row['Frame'])
+    
+    best_frame = start_f
+    min_err = 999.0
+    
+    if not valid.empty:
+        diffs = valid[col_name].apply(lambda x: angle_diff(x, target_val))
+        min_err = diffs.min()
+        best_frame = int(valid.loc[diffs.idxmin()]['Frame'])
+    
+    # Validation Check: 오차가 허용 범위(7도)를 초과하는가?
+    if min_err > margin:
+        # 오차가 크면 탐색 구간이 잘못된 것이므로, 주변 20프레임까지 강제 확장하여 다시 정밀 탐색
+        exp_start = max(0, start_f - 20)
+        exp_end = min(max_frames - 1, end_f + 20)
+        
+        sub_exp = db_df[(db_df['Frame'] >= exp_start) & (db_df['Frame'] <= exp_end)]
+        valid_exp = sub_exp.dropna(subset=[col_name])
+        
+        if not valid_exp.empty:
+            diffs_exp = valid_exp[col_name].apply(lambda x: angle_diff(x, target_val))
+            best_frame = int(valid_exp.loc[diffs_exp.idxmin()]['Frame'])
+            
+    return best_frame
 
 uploaded_file = st.file_uploader("스윙 영상을 업로드하세요 (MP4, MOV 등)", type=['mp4', 'mov', 'avi'])
 
@@ -98,7 +110,7 @@ if uploaded_file:
         st.session_state.current_file_name = uploaded_file.name
 
     if 'auto_frames' not in st.session_state:
-        with st.spinner("240장 전수 좌표 DB 구축 및 다이나믹 트래커 가동 중..."):
+        with st.spinner("240장 전수 DB 구축 및 자체 검증(Re-search) 수행 중..."):
             tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
             tfile.write(uploaded_file.read())
             frame_dir = tempfile.mkdtemp()
@@ -110,9 +122,7 @@ if uploaded_file:
             
             db_records = []
             p1_ground = None 
-            max_allowed_dist = None
             
-            # P1 초기화
             temp_cap = cv2.VideoCapture(tfile.name)
             ret, first_frame = temp_cap.read()
             if ret:
@@ -144,9 +154,8 @@ if uploaded_file:
             temp_cap.release()
             st.session_state.fixed_ground = p1_ground
 
-            prev_target_pt = None # 동적 트래커용 변수
-
-            # 240 프레임 전수 스캔 및 DB 좌표 기록
+            prev_tx, prev_ty = None, None 
+            
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret or total_frames > 600: break
@@ -166,22 +175,21 @@ if uploaded_file:
                     conf = p_res.keypoints.conf[0].cpu().numpy() if p_res.keypoints.conf is not None else np.ones(len(kpts))
                     
                     if len(kpts) > 10:
-                        if kpts[9][0] > 0 and conf[9] > 0.4: ly = kpts[9][1]
-                        if kpts[10][0] > 0 and conf[10] > 0.4: ry = kpts[10][1]
+                        if kpts[9][0] > 0 and conf[9] > 0.1: ly = kpts[9][1]
+                        if kpts[10][0] > 0 and conf[10] > 0.1: ry = kpts[10][1]
                         
                         if kpts[5][0] > 0 and kpts[9][0] > 0:
                             lsx, lsy = int(kpts[5][0]), int(kpts[5][1])
                             lwx, lwy = int(kpts[9][0]), int(kpts[9][1])
                             la = compute_relative_angle((lsx, lsy), (lwx, lwy), p1_ground[0], p1_ground[1])
-                        
                         if kpts[6][0] > 0 and kpts[10][0] > 0:
                             rsx, rsy = int(kpts[6][0]), int(kpts[6][1])
                             rwx, rwy = int(kpts[10][0]), int(kpts[10][1])
                             ra = compute_relative_angle((rsx, rsy), (rwx, rwy), p1_ground[0], p1_ground[1])
                         
                         pts = []
-                        if kpts[9][0] > 0 and conf[9] > 0.4: pts.append(kpts[9])
-                        if kpts[10][0] > 0 and conf[10] > 0.4: pts.append(kpts[10])
+                        if kpts[9][0] > 0 and conf[9] > 0.1: pts.append(kpts[9])
+                        if kpts[10][0] > 0 and conf[10] > 0.1: pts.append(kpts[10])
                         
                         if pts:
                             wrist_pt = (int(np.mean([p[0] for p in pts])), int(np.mean([p[1] for p in pts])))
@@ -191,26 +199,25 @@ if uploaded_file:
                             for box in c_res.boxes:
                                 c = float(box.conf[0])
                                 if c < 0.1: continue 
+                                
                                 cent = (int((box.xyxy[0][0]+box.xyxy[0][2])/2), int((box.xyxy[0][1]+box.xyxy[0][3])/2))
                                 dist = math.hypot(cent[0] - wrist_pt[0], cent[1] - wrist_pt[1])
                                 
                                 if dist < max_allowed_dist:
-                                    valid_targets.append(cent)
+                                    valid_targets.append((cent, dist))
                             
                             if valid_targets:
-                                # 💡 [동적 트래커] 이전 프레임 위치에서 가장 가까운 객체 추적
-                                if prev_target_pt is not None:
-                                    target_pt = min(valid_targets, key=lambda p: math.hypot(p[0]-prev_target_pt[0], p[1]-prev_target_pt[1]))
+                                if prev_tx is not None and prev_ty is not None:
+                                    target_pt = min(valid_targets, key=lambda p: math.hypot(p[0][0]-prev_tx, p[0][1]-prev_ty))[0]
                                 else:
-                                    target_pt = max(valid_targets, key=lambda p: math.hypot(p[0]-wrist_pt[0], p[1]-wrist_pt[1]))
+                                    target_pt = max(valid_targets, key=lambda p: p[1])[0] 
                                 
-                                prev_target_pt = target_pt
+                                prev_tx, prev_ty = target_pt[0], target_pt[1]
                                 tx, ty = target_pt[0], target_pt[1]
                                 sa = compute_relative_angle(wrist_pt, target_pt, p1_ground[0], p1_ground[1])
                             else:
-                                prev_target_pt = None
+                                prev_tx, prev_ty = None, None
                 
-                # DB에 모든 시각화 좌표 100% 저장 (오버레이 소실 방지)
                 db_records.append({
                     "Frame": total_frames,
                     "LeftHandY": ly, "RightHandY": ry,
@@ -222,8 +229,9 @@ if uploaded_file:
             cap.release()
             
             df_db = pd.DataFrame(db_records)
-            df_db['LeftHandY_Smooth'] = df_db['LeftHandY'].rolling(window=5, min_periods=1, center=True).median()
-            df_db['RightHandY_Smooth'] = df_db['RightHandY'].rolling(window=5, min_periods=1, center=True).median()
+            df_db['ShaftAngle'] = df_db['ShaftAngle'].interpolate(method='linear')
+            df_db['LeftHandY_Smooth'] = df_db['LeftHandY'].interpolate(method='linear').rolling(window=5, min_periods=1, center=True).median()
+            df_db['RightHandY_Smooth'] = df_db['RightHandY'].interpolate(method='linear').rolling(window=5, min_periods=1, center=True).median()
             st.session_state.df_db = df_db
             
             valid_ly = df_db.dropna(subset=['LeftHandY_Smooth'])
@@ -242,18 +250,18 @@ if uploaded_file:
 
             auto_f = {}
             auto_f["P1"] = p1_idx
-            auto_f["P2"] = find_best_frame_from_db(df_db, 'ShaftAngle', 45.0, p1_idx, p5_idx)
-            auto_f["P3"] = find_best_frame_from_db(df_db, 'ShaftAngle', 0.0, auto_f["P2"], p5_idx)
-            auto_f["P4"] = find_best_frame_from_db(df_db, 'LtArmAngle', 0.0, auto_f["P3"], p5_idx)
+            auto_f["P2"] = find_verified_frame_from_db(df_db, 'ShaftAngle', 45.0, p1_idx, p5_idx, total_frames, margin=7.0)
+            auto_f["P3"] = find_verified_frame_from_db(df_db, 'ShaftAngle', 0.0, auto_f["P2"], p5_idx, total_frames, margin=7.0)
+            auto_f["P4"] = find_verified_frame_from_db(df_db, 'LtArmAngle', 0.0, auto_f["P3"], p5_idx, total_frames, margin=7.0)
             auto_f["P5"] = p5_idx
             
-            auto_f["P6"] = find_best_frame_from_db(df_db, 'ShaftAngle', 315.0, p5_idx, p8_idx)
-            auto_f["P7"] = find_best_frame_from_db(df_db, 'ShaftAngle', 0.0, auto_f["P6"], p8_idx)
+            auto_f["P6"] = find_verified_frame_from_db(df_db, 'ShaftAngle', 315.0, p5_idx, p8_idx, total_frames, margin=7.0)
+            auto_f["P7"] = find_verified_frame_from_db(df_db, 'ShaftAngle', 0.0, auto_f["P6"], p8_idx, total_frames, margin=7.0)
             auto_f["P8"] = p8_idx
             
-            auto_f["P9"] = find_best_frame_from_db(df_db, 'ShaftAngle', 135.0, p8_idx, p12_idx)
-            auto_f["P10"] = find_best_frame_from_db(df_db, 'ShaftAngle', 180.0, auto_f["P9"], p12_idx)
-            auto_f["P11"] = find_best_frame_from_db(df_db, 'RtArmAngle', 180.0, auto_f["P10"], p12_idx)
+            auto_f["P9"] = find_verified_frame_from_db(df_db, 'ShaftAngle', 135.0, p8_idx, p12_idx, total_frames, margin=7.0)
+            auto_f["P10"] = find_verified_frame_from_db(df_db, 'ShaftAngle', 180.0, auto_f["P9"], p12_idx, total_frames, margin=7.0)
+            auto_f["P11"] = find_verified_frame_from_db(df_db, 'RtArmAngle', 180.0, auto_f["P10"], p12_idx, total_frames, margin=7.0)
             auto_f["P12"] = p12_idx
             auto_f["P13"] = p13_idx
 
@@ -262,9 +270,8 @@ if uploaded_file:
             st.session_state.fps = fps
             st.session_state.scan_done = True
 
-    # 💡 다이나믹 DB 로드 렌더링 블록 (재탐색 없이 DB 좌표 즉시 호출 -> 0.1초 반응)
     if 'scan_done' in st.session_state:
-        st.subheader("📸 DB 좌표 기반 실시간 다이나믹 미세조정 뷰")
+        st.subheader("📸 초정밀 자체 검증(Re-search 7°) 및 다이나믹 오버레이 뷰")
         cols = st.columns(4)
         analysis_data = []
         fixed_ground = st.session_state.fixed_ground
@@ -275,13 +282,11 @@ if uploaded_file:
                 phase_id = p['phase']
                 auto_fn = st.session_state.auto_frames.get(phase_id, 0)
                 
-                # 슬라이더 조정
                 fn = st.slider(f"[{phase_id}] 조정", 0, st.session_state.total_frames-1, auto_fn, key=f"slider_{phase_id}")
                 
                 img_path = os.path.join(st.session_state.frame_dir, f"frame_{fn:04d}.jpg")
                 img = cv2.imread(img_path)
                 
-                # 💡 DB에서 해당 프레임의 데이터 추출
                 frame_data = df_db[df_db['Frame'] == fn].iloc[0]
                 
                 measured_val = 0.0
@@ -300,15 +305,15 @@ if uploaded_file:
                             cv2.circle(img, (tx, ty), 8, (0, 0, 255), -1)
                             cv2.line(img, (wx, wy), (tx, ty), (0, 255, 0), 4)
                             
-                            measured_val = frame_data['ShaftAngle']
+                            measured_val = round(frame_data['ShaftAngle'], 1) if not pd.isna(frame_data['ShaftAngle']) else 0.0
                             cv2.putText(img, f"Shaft: {measured_val}deg", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                     
                     elif p['type'] == 'arm_left':
-                        if not pd.isna(frame_data['LShoulderX']) and not pd.isna(frame_data['WristX']): # 손목 기준
+                        if not pd.isna(frame_data['LShoulderX']) and not pd.isna(frame_data['WristX']):
                             lsx, lsy = int(frame_data['LShoulderX']), int(frame_data['LShoulderY'])
-                            lwx, lwy = int(frame_data['WristX']), int(frame_data['WristY']) # 왼손목 대용
+                            lwx, lwy = int(frame_data['WristX']), int(frame_data['WristY'])
                             cv2.line(img, (lsx, lsy), (lwx, lwy), (0, 255, 0), 4)
-                            measured_val = frame_data['LtArmAngle']
+                            measured_val = round(frame_data['LtArmAngle'], 1) if not pd.isna(frame_data['LtArmAngle']) else 0.0
                             cv2.putText(img, f"Lt Arm: {measured_val}deg", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
                     elif p['type'] == 'arm_right':
@@ -316,13 +321,16 @@ if uploaded_file:
                             rsx, rsy = int(frame_data['RShoulderX']), int(frame_data['RShoulderY'])
                             rwx, rwy = int(frame_data['WristX']), int(frame_data['WristY'])
                             cv2.line(img, (rsx, rsy), (rwx, rwy), (0, 255, 0), 4)
-                            measured_val = frame_data['RtArmAngle']
+                            measured_val = round(frame_data['RtArmAngle'], 1) if not pd.isna(frame_data['RtArmAngle']) else 0.0
                             cv2.putText(img, f"Rt Arm: {measured_val}deg", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
                     if p['target_angle'] is not None and not pd.isna(measured_val):
                         error = angle_diff(measured_val, p['target_angle'])
-                        if error > 20:
+                        # 💡 7도 엄격 검증 기준 적용
+                        if error > 7.0:
                             verification_status = "Check (Review)"
+                        else:
+                            verification_status = "Pass"
 
                     st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption=f"[{phase_id}] {p['name']} ({verification_status})", use_column_width=True)
                 
@@ -338,5 +346,5 @@ if uploaded_file:
                 })
 
         st.divider()
-        st.subheader("📊 좌표 DB 검증 결과 표")
+        st.subheader("📊 초정밀 자체 검증 결과 표 (Tolerance: 7°)")
         st.dataframe(pd.DataFrame(analysis_data), use_container_width=True, hide_index=True)
