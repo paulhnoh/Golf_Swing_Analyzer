@@ -35,6 +35,10 @@ with st.sidebar:
                                      help="칼만 예측 위치를 중심으로 이 반경 안에서만 클럽을 찾습니다. 너무 좁으면 빠른 스윙 구간에서 놓칩니다.")
     det_imgsz = st.select_slider("ROI 탐지 해상도(imgsz)", options=[320, 480, 640, 800, 960], value=640,
                                   help="크롭된 영역을 이 크기로 확대해서 탐지합니다. 작은 헤드/샤프트일수록 높이는 게 유리합니다.")
+    st.divider()
+    st.header("🏁 P13(정지) 판정")
+    still_px_th = st.slider("정지 판정 임계값(px/frame)", 0.5, 8.0, 2.0, 0.5,
+                             help="손목+클럽의 프레임간 이동량이 이 값 미만으로 연속 3프레임 유지되면 '정지'로 판정합니다. 카메라가 흔들리면 값을 키워보세요.")
     if st.button("🔄 현재 설정으로 다시 분석"):
         for k in ['scan_done', 'df', 'frame_dir', 'p1_gp', 'ref_club_len', 'auto_f', 'tot_frames', 'phases_info']:
             st.session_state.pop(k, None)
@@ -310,9 +314,13 @@ if uploaded_file:
                 p12 = int(df['WY_Smooth'].iloc[p5 + 15 :].idxmin()) if len(df.iloc[p5 + 15 :]) > 0 else tot_frames - 1
             except:
                 p12 = tot_frames - 1
-                
+
+            # P8(임팩트): "손목 혹은 헤드 최저점" -> 두 신호 중 더 낮은(화면상 Y가 큰) 쪽을 프레임별로 취해
+            # 그 결합 신호가 최대가 되는 지점을 찾는다. 클럽 헤드가 손목보다 늦게 최저점에 도달하는
+            # 릴리즈/래그 특성을 반영해 손목만 볼 때보다 실제 임팩트에 더 가깝게 잡힌다.
             try:
-                sub_imp = df['WY_Smooth'].iloc[p5 + 5 : p12 - 5]
+                low_point_signal = df[['WY_Smooth', 'TY_Smooth']].max(axis=1)
+                sub_imp = low_point_signal.iloc[p5 + 5 : p12 - 5]
                 p8 = int(sub_imp.idxmax()) if not sub_imp.empty else p5 + (p12 - p5) // 2
             except:
                 p8 = p5 + (tot_frames - p5) // 2
@@ -329,32 +337,65 @@ if uploaded_file:
             except:
                 is_left_handed = False
 
+            # P13(피니시 정지): 전체 스윙이 끝나고 손목+클럽의 움직임이 2~3프레임 이상
+            # 거의 없어지는 첫 시점을 찾는다. 못 찾으면 마지막 프레임으로 대체.
+            try:
+                search_start = min(p12 + 3, tot_frames - 1)
+                wrist_disp = np.hypot(df['WX_Smooth'].diff(), df['WY_Smooth'].diff())
+                club_disp = np.hypot(df['TX_Smooth'].diff(), df['TY_Smooth'].diff())
+                combined_disp = wrist_disp.fillna(999.0) + club_disp.fillna(0.0) * 0.5
+
+                p13 = tot_frames - 1
+                for idx in range(search_start, max(search_start, tot_frames - 2)):
+                    window = combined_disp.iloc[idx: idx + 3]
+                    if len(window) == 3 and (window < still_px_th).all():
+                        p13 = idx
+                        break
+            except Exception:
+                p13 = tot_frames - 1
+
+            # --- 목표 각도 (청사진 나침반 기준: Left=0, Down=90, Right=180, Up=270) ---
+            # Nelly Korda 레퍼런스(오른손잡이) 기준 값. 좌타는 화면 좌우가 뒤집히므로
+            # mirror_angle()로 대칭 변환해서 사용한다 (Down/Up은 그대로, Left<->Right만 뒤집힘).
+            def mirror_angle(a):
+                return (180.0 - a) % 360.0
+
+            BASE_P2, BASE_P3 = 45.0, 0.0          # P2 샤프트45도, P3 샤프트0도
+            BASE_P4 = 0.0                          # P4 리드암(왼팔) 수평
+            BASE_P6, BASE_P7 = 315.0, 0.0          # P6 샤프트315도, P7 샤프트0도
+            BASE_P9, BASE_P10 = 135.0, 0.0         # P9 샤프트135도, P10 샤프트0도
+            BASE_P11 = 0.0                         # P11 리드암 반대팔(오른팔) 수평
+
             if is_left_handed:
-                tgt_p2, tgt_p3, tgt_p6, tgt_p7, tgt_p9, tgt_p10 = 45.0, 0.0, 315.0, 0.0, 180.0, 180.0
-                tgt_p4_arm, tgt_p4_ang = 'RA_Smooth', 0.0
-                tgt_p11_arm, tgt_p11_ang = 'LA_Smooth', 180.0
+                tgt_p2, tgt_p3 = mirror_angle(BASE_P2), mirror_angle(BASE_P3)
+                tgt_p6, tgt_p7 = mirror_angle(BASE_P6), mirror_angle(BASE_P7)
+                tgt_p9, tgt_p10 = mirror_angle(BASE_P9), mirror_angle(BASE_P10)
+                tgt_p4_arm, tgt_p4_ang = 'RA_Smooth', mirror_angle(BASE_P4)
+                tgt_p11_arm, tgt_p11_ang = 'LA_Smooth', mirror_angle(BASE_P11)
             else:
-                tgt_p2, tgt_p3, tgt_p6, tgt_p7, tgt_p9, tgt_p10 = 135.0, 180.0, 225.0, 180.0, 45.0, 0.0
-                tgt_p4_arm, tgt_p4_ang = 'LA_Smooth', 180.0
-                tgt_p11_arm, tgt_p11_ang = 'RA_Smooth', 0.0
+                tgt_p2, tgt_p3 = BASE_P2, BASE_P3
+                tgt_p6, tgt_p7 = BASE_P6, BASE_P7
+                tgt_p9, tgt_p10 = BASE_P9, BASE_P10
+                tgt_p4_arm, tgt_p4_ang = 'LA_Smooth', BASE_P4
+                tgt_p11_arm, tgt_p11_ang = 'RA_Smooth', BASE_P11
 
             phases_info = [
                 {"phase": "P1", "name": "Address", "target": None, "type": "shaft"},
-                {"phase": "P2", "name": "Start Sweep", "target": tgt_p2, "type": "shaft"},
-                {"phase": "P3", "name": "Back Alignment", "target": tgt_p3, "type": "shaft"},
-                {"phase": "P4", "name": "Start Shoulder Back", "target": tgt_p4_ang, "type": "arm_left" if not is_left_handed else "arm_right"},
-                {"phase": "P5", "name": "Backswing Top", "target": None, "type": "top"},
-                {"phase": "P6", "name": "Transition", "target": tgt_p6, "type": "shaft"},
-                {"phase": "P7", "name": "DB Alignment", "target": tgt_p7, "type": "shaft"},
-                {"phase": "P8", "name": "Impact", "target": None, "type": "impact"},
-                {"phase": "P9", "name": "Lowest Club Head", "target": tgt_p9, "type": "shaft"},
-                {"phase": "P10", "name": "DF Alignment", "target": tgt_p10, "type": "shaft"},
-                {"phase": "P11", "name": "Start Shoulder Forward", "target": tgt_p11_ang, "type": "arm_right" if not is_left_handed else "arm_left"},
-                {"phase": "P12", "name": "Downswing Top", "target": None, "type": "top"},
-                {"phase": "P13", "name": "Finish", "target": None, "type": "finish"},
+                {"phase": "P2", "name": "Start Sweep (샤프트 45°)", "target": tgt_p2, "type": "shaft"},
+                {"phase": "P3", "name": "Back Alignment (샤프트 0°)", "target": tgt_p3, "type": "shaft"},
+                {"phase": "P4", "name": "Lead Arm Parallel (리드암 수평)", "target": tgt_p4_ang, "type": "arm_left" if not is_left_handed else "arm_right"},
+                {"phase": "P5", "name": "Backswing Top (리드손 최고점)", "target": None, "type": "top"},
+                {"phase": "P6", "name": "Transition (샤프트 315°)", "target": tgt_p6, "type": "shaft"},
+                {"phase": "P7", "name": "DB Alignment (샤프트 0°)", "target": tgt_p7, "type": "shaft"},
+                {"phase": "P8", "name": "Impact (손목/헤드 최저점)", "target": None, "type": "impact"},
+                {"phase": "P9", "name": "Release (샤프트 135°)", "target": tgt_p9, "type": "shaft"},
+                {"phase": "P10", "name": "DF Alignment (샤프트 0°)", "target": tgt_p10, "type": "shaft"},
+                {"phase": "P11", "name": "Trail Arm Parallel (반대팔 수평)", "target": tgt_p11_ang, "type": "arm_right" if not is_left_handed else "arm_left"},
+                {"phase": "P12", "name": "Follow-Through Top (반대손 최고점)", "target": None, "type": "top"},
+                {"phase": "P13", "name": "Finish (동작 정지)", "target": None, "type": "finish"},
             ]
 
-            auto_f = {"P1": p1, "P5": p5, "P8": p8, "P12": p12, "P13": tot_frames - 1}
+            auto_f = {"P1": p1, "P5": p5, "P8": p8, "P12": p12, "P13": p13}
             auto_f["P2"] = find_closest_frame(df, 'SA_Smooth', tgt_p2, p1, p5)
             auto_f["P3"] = find_closest_frame(df, 'SA_Smooth', tgt_p3, auto_f["P2"], p5)
             auto_f["P4"] = find_closest_frame(df, tgt_p4_arm, tgt_p4_ang, p1, p5)
