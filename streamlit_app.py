@@ -221,7 +221,11 @@ if uploaded_file:
             wx_start, wy_start = None, None
             kf_club = None          # 클럽(헤드/샤프트) 위치 추적용 칼만 필터. 탐지가 끊겨도 이걸로 위치를 이어감
             roi_half = max(70, st.session_state.ref_club_len * search_radius_ratio)
-            miss_streak = 0         # 연속 미탐지 횟수. 너무 오래 놓치면 탐색 반경을 넓혀 재탐색
+            miss_streak = 0         # 연속 미탐지 횟수. 너무 오래 놓치면 탐색 반경을 넓히다가, 그래도 안되면 락을 포기함
+            MAX_MISS_STREAK = 8     # 다운스윙처럼 빠른 구간에서 칼만 예측이 계속 빗나갈 때, 발산한 값을 계속 믿지 않도록 상한을 둠
+            frame_w_ref = int(f_frame.shape[1])
+            frame_h_ref = int(f_frame.shape[0])
+            debug_detect_log = []   # 진단 패널용: 프레임별 탐지 성공 여부 기록
 
             for fn in range(tot_frames):
                 ret, frame = cap.read()
@@ -230,6 +234,7 @@ if uploaded_file:
 
                 row = {'Frame': fn, 'WX': np.nan, 'WY': np.nan, 'TX': np.nan, 'TY': np.nan,
                        'LX': np.nan, 'LY': np.nan, 'RX': np.nan, 'RY': np.nan, 'T_Predicted': False}
+                det_status = 'no_wrist'
 
                 try:
                     p_res = pose_model(frame, verbose=False)[0]
@@ -251,12 +256,16 @@ if uploaded_file:
                                 if kf_club is None:
                                     # 아직 한 번도 못 잡았으면 손목 위치를 기준으로 탐색 시작
                                     pred_x, pred_y = row['WX'], row['WY']
+                                    # 최초 락 획득 전에는 탐색 범위를 넉넉하게 잡아 빨리 잡히게 함
+                                    cur_radius = max(roi_half * 1.8, min(frame_w_ref, frame_h_ref) * 0.30)
                                 else:
                                     pred = kf_club.predict()
                                     pred_x, pred_y = float(pred[0, 0]), float(pred[1, 0])
-
-                                # 놓친 프레임이 누적되면 탐색 반경을 점진적으로 넓혀 재포착 확률을 높임
-                                cur_radius = roi_half * (1.0 + min(miss_streak, 6) * 0.25)
+                                    # 화면 밖으로 발산하지 않도록 예측 위치를 프레임 범위 안으로 고정
+                                    pred_x = float(np.clip(pred_x, 0, frame_w_ref - 1))
+                                    pred_y = float(np.clip(pred_y, 0, frame_h_ref - 1))
+                                    # 놓친 프레임이 누적되면 탐색 반경을 점진적으로 넓혀 재포착 확률을 높임
+                                    cur_radius = roi_half * (1.0 + min(miss_streak, 6) * 0.25)
 
                                 meas = detect_club_in_roi(frame, custom_model, pred_x, pred_y,
                                                            cur_radius, row['WX'], row['WY'],
@@ -271,18 +280,29 @@ if uploaded_file:
                                     row['TX'], row['TY'] = mx, my
                                     row['T_Predicted'] = False
                                     miss_streak = 0
-                                elif kf_club is not None:
+                                    det_status = 'detected'
+                                elif kf_club is not None and miss_streak < MAX_MISS_STREAK:
                                     # 탐지 실패해도 직전 속도 기반 예측치로 채워서 궤적이 끊기지 않게 함
                                     row['TX'], row['TY'] = pred_x, pred_y
                                     row['T_Predicted'] = True
                                     miss_streak += 1
+                                    det_status = 'predicted'
                                 else:
-                                    miss_streak += 1
+                                    # 너무 오래 놓치면 예측을 더 신뢰하지 않고 락을 포기 -> 나중 단계에서 보간으로 채움
+                                    if kf_club is not None:
+                                        miss_streak += 1
+                                        if miss_streak >= MAX_MISS_STREAK:
+                                            kf_club = None
+                                            miss_streak = 0
+                                    det_status = 'lost'
                 except Exception:
                     pass
 
+                debug_detect_log.append({'Frame': fn, 'status': det_status})
+
                 db_data.append(row)
             cap.release()
+            st.session_state.debug_detect_log = pd.DataFrame(debug_detect_log)
 
         with st.spinner("2단계: 데이터 정제 및 안정화 처리 중..."):
             df = pd.DataFrame(db_data)
@@ -326,6 +346,8 @@ if uploaded_file:
                 p8 = p5 + (tot_frames - p5) // 2
                 
             try:
+                # Address(P1): 정지 상태에서 손목이 처음 움직이기 시작하는 시점.
+                # 3px 임계값으로 초기 움직임을 감지 (실측 검증 결과 이 방식이 정확함 - 되돌리지 말 것)
                 wx_start_avg = df['WX_Smooth'].iloc[0:min(5, len(df))].mean()
                 p1_mask = (df['WX_Smooth'].iloc[:p5] - wx_start_avg).abs() > 3.0
                 p1 = int(p1_mask.idxmax()) if p1_mask.any() else 0
@@ -415,6 +437,38 @@ if uploaded_file:
             st.session_state.scan_done = True
 
     if 'scan_done' in st.session_state and 'df' in st.session_state:
+        if 'debug_detect_log' in st.session_state:
+            dbg = st.session_state.debug_detect_log
+            with st.expander("🔍 클럽 탐지 진단 정보 (문제 구간 찾기용)"):
+                total = len(dbg)
+                n_det = int((dbg['status'] == 'detected').sum())
+                n_pred = int((dbg['status'] == 'predicted').sum())
+                n_lost = int((dbg['status'] == 'lost').sum())
+                c1, c2, c3 = st.columns(3)
+                c1.metric("실측 탐지", f"{n_det}/{total}", f"{n_det/total*100:.0f}%")
+                c2.metric("칼만 예측으로 보완", f"{n_pred}/{total}", f"{n_pred/total*100:.0f}%")
+                c3.metric("완전 미탐지(락 상실)", f"{n_lost}/{total}", f"{n_lost/total*100:.0f}%")
+
+                # 연속 미탐지(lost) 구간을 찾아 프레임 범위로 보여줌 -> 실측값과 대조하기 쉬움
+                lost_mask = (dbg['status'] == 'lost').to_numpy()
+                ranges = []
+                start = None
+                for i, v in enumerate(lost_mask):
+                    if v and start is None:
+                        start = i
+                    elif not v and start is not None:
+                        if i - start >= 3:
+                            ranges.append((start, i - 1))
+                        start = None
+                if start is not None and len(lost_mask) - start >= 3:
+                    ranges.append((start, len(lost_mask) - 1))
+
+                if ranges:
+                    st.caption("연속 3프레임 이상 클럽을 완전히 놓친 구간 (이 구간의 각도값은 신뢰하기 어려움):")
+                    st.write(", ".join([f"{a}~{b}프레임" for a, b in ranges]))
+                else:
+                    st.caption("연속 미탐지 구간 없음 — 전체적으로 안정적으로 추적됨.")
+
         st.subheader("📸 청사진(Compass) 좌/우타 동기화 뷰")
         cols = st.columns(4)
         df, frame_dir = st.session_state.df, st.session_state.frame_dir
