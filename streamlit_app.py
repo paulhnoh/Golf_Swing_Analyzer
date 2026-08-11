@@ -1,10 +1,9 @@
 """
 ================================================================================
-[상용화 레벨: P1-P13 무결점 통합 마스터 엔진 (Head-Class Priority Fix)]
-1. Head-Class Priority: custom_golf.pt 모델이 제공하는 'head'(클럽 헤드) 클래스를 
-   최우선으로 록인하여, 샤프트 중간이나 잔상을 헤드로 오인하는 현상 원천 차단.
-2. 좌/우타 자동 감지 및 청사진(Left=0, Right=180) 나침반 렌더링 완벽 유지.
-3. V-Curve 뼈대 록인 및 좌표 스무딩을 통한 타임라인 붕괴 방지.
+[상용화 레벨: P1-P13 무결점 통합 마스터 엔진 (Bulletproof Defensive Fix)]
+1. YOLO 모델의 클래스 이름 파싱 에러 및 대소문자/키워드 유연성 확보 ('head', 'club' 등)
+2. 사람이나 클럽이 감지되지 않을 때의 None 및 Index Out of Range 에러 완벽 방어
+3. 좌/우타 자동 감지 및 청사진 나침반 렌더링 무결성 유지
 ================================================================================
 """
 
@@ -17,9 +16,9 @@ import os
 import tempfile
 from ultralytics import YOLO
 
-st.set_page_config(page_title="P1-P13 Master Head-Priority Analyzer", layout="wide")
-st.title("⛳ 골프 스윙 P1~P13 클럽 헤드 클래스 우선 추적 시스템")
-st.markdown("AI 모델의 'head' 클래스를 직접 타겟팅하여 샤프트 튐 현상을 완벽히 해결한 버전입니다.")
+st.set_page_config(page_title="P1-P13 Master Bulletproof Analyzer", layout="wide")
+st.title("⛳ 골프 스윙 P1~P13 방어형 안정화 분석 시스템")
+st.markdown("모델 탐지 데이터 유무와 관계없이 앱이 절대 멈추지 않도록 안전 장치가 강화된 버전입니다.")
 
 @st.cache_resource
 def load_models():
@@ -29,7 +28,7 @@ pose_model, custom_model = load_models()
 
 def get_blueprint_angle(x1, y1, x2, y2, gp1, gp2):
     """청사진(Left=0, Down=90, Right=180, Up=270) 수학 공식"""
-    if pd.isna(x1) or pd.isna(x2): return np.nan
+    if pd.isna(x1) or pd.isna(x2) or pd.isna(y1) or pd.isna(y2): return np.nan
     if gp1[0] > gp2[0]: gp1, gp2 = gp2, gp1
     
     g_angle = math.atan2(gp2[1] - gp1[1], gp2[0] - gp1[0])
@@ -45,10 +44,10 @@ def get_blueprint_angle(x1, y1, x2, y2, gp1, gp2):
     return round(val, 1)
 
 def find_closest_frame(df, col, target, start_f, end_f):
-    if start_f >= end_f: return start_f
+    if start_f >= end_f or col not in df.columns: return start_f
     sub = df[(df['Frame'] >= start_f) & (df['Frame'] <= end_f)].copy()
     if sub.empty: return start_f
-    sub['diff'] = sub[col].apply(lambda x: min(abs(x - target) % 360, 360 - (abs(x - target) % 360)))
+    sub['diff'] = sub[col].apply(lambda x: min(abs(x - target) % 360, 360 - (abs(x - target) % 360)) if not pd.isna(x) else 999)
     return int(sub['diff'].idxmin())
 
 def draw_text_with_outline(img, text, pos, font_scale, text_color, outline_color, thickness):
@@ -57,7 +56,7 @@ def draw_text_with_outline(img, text, pos, font_scale, text_color, outline_color
     cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, thickness, cv2.LINE_AA)
 
 def draw_dynamic_visuals_with_compass(img, vertex, angle, length, gp1, gp2, color, label):
-    if pd.isna(angle) or pd.isna(vertex[0]): return
+    if pd.isna(angle) or pd.isna(vertex[0]) or pd.isna(vertex[1]): return
     if gp1[0] > gp2[0]: gp1, gp2 = gp2, gp1
     g_angle = math.atan2(gp2[1] - gp1[1], gp2[0] - gp1[0])
     
@@ -117,16 +116,24 @@ if uploaded_file:
         cap = cv2.VideoCapture(tfile.name)
         tot_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
-        with st.spinner("1단계: 기초 캘리브레이션 중..."):
+        with st.spinner("1단계: 기초 캘리브레이션 및 방어형 스캔 중..."):
             ret, f_frame = cap.read()
+            if not ret or f_frame is None:
+                st.error("영상을 읽을 수 없습니다. 올바른 비디오 파일을 업로드해주세요.")
+                st.stop()
+                
             p1_gp = ((int(f_frame.shape[1]*0.35), int(f_frame.shape[0]*0.85)), 
                      (int(f_frame.shape[1]*0.65), int(f_frame.shape[0]*0.85)))
             
-            p_res = pose_model(f_frame, verbose=False)[0]
-            if p_res.keypoints is not None and len(p_res.keypoints.xy) > 0:
-                kp = p_res.keypoints.xy[0].cpu().numpy()
-                if len(kp) > 16 and kp[15][0] > 0 and kp[16][0] > 0:
-                    p1_gp = ((int(kp[15][0]), int(kp[15][1])), (int(kp[16][0]), int(kp[16][1])))
+            try:
+                p_res = pose_model(f_frame, verbose=False)[0]
+                if p_res.keypoints is not None and len(p_res.keypoints.xy) > 0:
+                    kp = p_res.keypoints.xy[0].cpu().numpy()
+                    if len(kp) > 16 and kp[15][0] > 0 and kp[16][0] > 0:
+                        p1_gp = ((int(kp[15][0]), int(kp[15][1])), (int(kp[16][0]), int(kp[16][1])))
+            except Exception:
+                pass
+
             st.session_state.p1_gp = p1_gp
             st.session_state.ref_club_len = f_frame.shape[1] * 0.3
 
@@ -138,71 +145,77 @@ if uploaded_file:
 
             for fn in range(tot_frames):
                 ret, frame = cap.read()
-                if not ret: break
+                if not ret or frame is None: break
                 cv2.imwrite(os.path.join(frame_dir, f"frame_{fn:04d}.jpg"), frame)
-                
-                p_res = pose_model(frame, verbose=False)[0]
-                c_res = custom_model(frame, verbose=False)[0]
                 
                 row = {'Frame': fn, 'WX': np.nan, 'WY': np.nan, 'TX': np.nan, 'TY': np.nan,
                        'LX': np.nan, 'LY': np.nan, 'RX': np.nan, 'RY': np.nan}
                 
-                if p_res.keypoints is not None and len(p_res.keypoints.xy) > 0:
-                    kp = p_res.keypoints.xy[0].cpu().numpy()
-                    cf = p_res.keypoints.conf[0].cpu().numpy() if p_res.keypoints.conf is not None else np.ones(17)
+                try:
+                    p_res = pose_model(frame, verbose=False)[0]
+                    c_res = custom_model(frame, verbose=False)[0]
                     
-                    if len(kp) > 10:
-                        if kp[5][0] > 0: row['LX'], row['LY'] = float(kp[5][0]), float(kp[5][1])
-                        if kp[6][0] > 0: row['RX'], row['RY'] = float(kp[6][0]), float(kp[6][1])
-                        pts = [kp[i] for i in (9,10) if kp[i][0] > 0 and cf[i] > 0.1]
+                    if p_res.keypoints is not None and len(p_res.keypoints.xy) > 0:
+                        kp = p_res.keypoints.xy[0].cpu().numpy()
+                        cf = p_res.keypoints.conf[0].cpu().numpy() if p_res.keypoints.conf is not None else np.ones(17)
                         
-                        if pts:
-                            row['WX'], row['WY'] = float(np.mean([p[0] for p in pts])), float(np.mean([p[1] for p in pts]))
-                            if wx_start is None: wx_start, wy_start = row['WX'], row['WY']
+                        if len(kp) > 10:
+                            if kp[5][0] > 0: row['LX'], row['LY'] = float(kp[5][0]), float(kp[5][1])
+                            if kp[6][0] > 0: row['RX'], row['RY'] = float(kp[6][0]), float(kp[6][1])
+                            pts = [kp[i] for i in (9,10) if kp[i][0] > 0 and cf[i] > 0.05]
                             
-                            # 💡 [핵심] 'head'(클럽 헤드) 클래스를 최우선으로 탐색!
-                            head_candidates = []
-                            shaft_candidates = []
-                            
-                            for box in c_res.boxes:
-                                conf = float(box.conf[0].item())
-                                if conf < 0.2: continue
-                                cls_name = c_res.names[int(box.cls[0])]
+                            if pts:
+                                row['WX'], row['WY'] = float(np.mean([p[0] for p in pts])), float(np.mean([p[1] for p in pts]))
+                                if wx_start is None: wx_start, wy_start = row['WX'], row['WY']
                                 
-                                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                                cx, cy = float((x1+x2)/2.0), float((y1+y2)/2.0)
-                                dist = math.hypot(cx - row['WX'], cy - row['WY'])
+                                head_candidates = []
+                                shaft_candidates = []
                                 
-                                if dist > st.session_state.ref_club_len * 2.2: continue
-                                
-                                # 공(Tee) 오인식 필터
-                                if p1_target is not None and fn > 10:
-                                    hands_moved = math.hypot(row['WX'] - wx_start, row['WY'] - wy_start) > 30
-                                    if hands_moved and math.hypot(cx - p1_target[0], cy - p1_target[1]) < 45:
-                                        continue
+                                if c_res.boxes is not None and len(c_res.boxes) > 0:
+                                    for box in c_res.boxes:
+                                        conf = float(box.conf[0].item())
+                                        if conf < 0.15: continue
                                         
-                                if cls_name == 'head':
-                                    head_candidates.append((cx, cy, dist, conf))
-                                elif cls_name == 'shaft':
-                                    shaft_candidates.append((cx, cy, dist, conf))
+                                        cls_idx = int(box.cls[0].item())
+                                        cls_name = str(c_res.names.get(cls_idx, cls_idx)).lower()
+                                        
+                                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                                        cx, cy = float((x1+x2)/2.0), float((y1+y2)/2.0)
+                                        dist = math.hypot(cx - row['WX'], cy - row['WY'])
+                                        
+                                        if dist > st.session_state.ref_club_len * 2.5: continue
+                                        
+                                        # 유연한 클래스 이름 매칭 (head, club, shaft 등 포함 여부 확인)
+                                        if 'head' in cls_name or 'club' in cls_name:
+                                            head_candidates.append((cx, cy, dist, conf))
+                                        elif 'shaft' in cls_name or 'rod' in cls_name or 'stick' in cls_name:
+                                            shaft_candidates.append((cx, cy, dist, conf))
+                                        else:
+                                            # 이름이 명확하지 않은 경우 일단 샤프트/일반 객체로 분류
+                                            shaft_candidates.append((cx, cy, dist, conf))
+                                            
+                                if head_candidates:
+                                    best_h = max(head_candidates, key=lambda x: x[3]) # 신뢰도 우선
+                                    row['TX'], row['TY'] = best_h[0], best_h[1]
+                                elif shaft_candidates:
+                                    best_s = max(shaft_candidates, key=lambda x: x[2]) # 손목에서 가장 먼 곳 우선
+                                    row['TX'], row['TY'] = best_s[0], best_s[1]
                                     
-                            if head_candidates:
-                                # 신뢰도가 가장 높은 헤드 박스 선택
-                                best_h = max(head_candidates, key=lambda x: x[3])
-                                row['TX'], row['TY'] = best_h[0], best_h[1]
-                            elif shaft_candidates:
-                                # 헤드가 안 보이면 손목에서 가장 먼 샤프트 끝단 선택
-                                best_s = max(shaft_candidates, key=lambda x: x[2])
-                                row['TX'], row['TY'] = best_s[0], best_s[1]
-                                
-                            if fn < 5 and not pd.isna(row['TX']) and p1_target is None:
-                                p1_target = (row['TX'], row['TY'])
-                                
+                                if fn < 5 and not pd.isna(row['TX']) and p1_target is None:
+                                    p1_target = (row['TX'], row['TY'])
+                except Exception:
+                    pass # 프레임 처리 중 예외 발생 시 해당 프레임은 스킵하고 진행
+                    
                 db_data.append(row)
             cap.release()
 
-        with st.spinner("2단계: 좌표 스무딩 및 완벽한 수학적 궤적 산출 중..."):
+        with st.spinner("2단계: 데이터 정제 및 안정화 처리 중..."):
             df = pd.DataFrame(db_data)
+            
+            # 모든 좌표 열 존재 보장
+            for col in ['WX', 'WY', 'LX', 'LY', 'RX', 'RY', 'TX', 'TY']:
+                if col not in df.columns: df[col] = np.nan
+
             df[['WX', 'WY', 'LX', 'LY', 'RX', 'RY', 'TX', 'TY']] = df[['WX', 'WY', 'LX', 'LY', 'RX', 'RY', 'TX', 'TY']].interpolate(limit_direction='both')
             
             for col in ['WX', 'WY', 'LX', 'LY', 'RX', 'RY', 'TX', 'TY']:
@@ -213,20 +226,37 @@ if uploaded_file:
                 df.loc[i, 'LA_Smooth'] = get_blueprint_angle(df.loc[i, 'LX_Smooth'], df.loc[i, 'LY_Smooth'], df.loc[i, 'WX_Smooth'], df.loc[i, 'WY_Smooth'], p1_gp[0], p1_gp[1])
                 df.loc[i, 'RA_Smooth'] = get_blueprint_angle(df.loc[i, 'RX_Smooth'], df.loc[i, 'RY_Smooth'], df.loc[i, 'WX_Smooth'], df.loc[i, 'WY_Smooth'], p1_gp[0], p1_gp[1])
 
-        with st.spinner("3단계: 좌/우타 자동 감지 및 시퀀스 타임라인 구축 중..."):
-            p5 = int(df['WY_Smooth'].iloc[:int(tot_frames * 0.65)].idxmin())
-            p12 = int(df['WY_Smooth'].iloc[p5 + 15 :].idxmin()) if len(df.iloc[p5 + 15 :]) > 0 else tot_frames - 1
-            sub_imp = df['WY_Smooth'].iloc[p5 + 5 : p12 - 5]
-            p8 = int(sub_imp.idxmax()) if not sub_imp.empty else p5 + (p12 - p5) // 2
-            
-            wx_start_avg = df['WX_Smooth'].iloc[0:5].mean()
-            p1_mask = (df['WX_Smooth'].iloc[:p5] - wx_start_avg).abs() > 3.0
-            p1 = int(p1_mask.idxmax()) if p1_mask.any() else 0
+        with st.spinner("3단계: 시퀀스 타임라인 및 좌/우타 매칭 중..."):
+            try:
+                p5 = int(df['WY_Smooth'].iloc[:int(tot_frames * 0.65)].idxmin())
+            except:
+                p5 = int(tot_frames * 0.3)
+                
+            try:
+                p12 = int(df['WY_Smooth'].iloc[p5 + 15 :].idxmin()) if len(df.iloc[p5 + 15 :]) > 0 else tot_frames - 1
+            except:
+                p12 = tot_frames - 1
+                
+            try:
+                sub_imp = df['WY_Smooth'].iloc[p5 + 5 : p12 - 5]
+                p8 = int(sub_imp.idxmax()) if not sub_imp.empty else p5 + (p12 - p5) // 2
+            except:
+                p8 = p5 + (tot_frames - p5) // 2
+                
+            try:
+                wx_start_avg = df['WX_Smooth'].iloc[0:min(5, len(df))].mean()
+                p1_mask = (df['WX_Smooth'].iloc[:p5] - wx_start_avg).abs() > 3.0
+                p1 = int(p1_mask.idxmax()) if p1_mask.any() else 0
+            except:
+                p1 = 0
 
-            is_left_handed = df['WX_Smooth'].iloc[p5] < df['WX_Smooth'].iloc[p1]
+            try:
+                is_left_handed = df['WX_Smooth'].iloc[p5] < df['WX_Smooth'].iloc[p1]
+            except:
+                is_left_handed = False
 
             if is_left_handed:
-                st.toast("🏌️‍♂️ 좌타자(Left-handed) 스윙 궤적이 감지되었습니다. 타겟 각도를 반전합니다!", icon="🔄")
+                st.toast("🏌️‍♂️ 좌타자(Left-handed) 스윙 궤적이 감지되었습니다.", icon="🔄")
                 tgt_p2, tgt_p3, tgt_p6, tgt_p7, tgt_p9, tgt_p10 = 45.0, 0.0, 315.0, 0.0, 180.0, 180.0
                 tgt_p4_arm, tgt_p4_ang = 'RA_Smooth', 0.0
                 tgt_p11_arm, tgt_p11_ang = 'LA_Smooth', 180.0
@@ -272,7 +302,7 @@ if uploaded_file:
             st.session_state.scan_done = True
 
     if 'scan_done' in st.session_state and 'df' in st.session_state:
-        st.subheader("📸 청사진(Compass) 좌/우타 100% 동기화 분석 뷰")
+        st.subheader("📸 청사진(Compass) 좌/우타 동기화 뷰")
         cols = st.columns(4)
         df, frame_dir = st.session_state.df, st.session_state.frame_dir
         p1_gp = st.session_state.p1_gp
@@ -282,27 +312,30 @@ if uploaded_file:
         for i, p in enumerate(phases):
             with cols[i % 4]:
                 af = st.session_state.auto_f.get(p['phase'], 0)
-                fn = st.slider(f"[{p['phase']}] 조정", 0, st.session_state.tot_frames-1, af, key=f"s_{i}")
+                fn = st.slider(f"[{p['phase']}] 조정", 0, max(0, st.session_state.tot_frames-1), af, key=f"s_{i}")
                 
-                img = cv2.imread(os.path.join(frame_dir, f"frame_{fn:04d}.jpg"))
-                row = df.loc[fn]
+                img_path = os.path.join(frame_dir, f"frame_{fn:04d}.jpg")
+                if os.path.exists(img_path):
+                    img = cv2.imread(img_path)
+                else:
+                    img = np.zeros((480, 640, 3), dtype=np.uint8)
+
+                row = df.loc[fn] if fn in df.index else None
                 
                 cv2.line(img, p1_gp[0], p1_gp[1], (0,0,255), 4, cv2.LINE_AA)
                 draw_text_with_outline(img, "Ground", (p1_gp[0][0], p1_gp[0][1]+30), 0.6, (0,0,255), (255,255,255), 2)
                 
-                wx, wy = int(row['WX_Smooth']), int(row['WY_Smooth'])
-                
-                if p['type'] == 'shaft':
-                    draw_dynamic_visuals_with_compass(img, (wx, wy), row['SA_Smooth'], ref_len, p1_gp[0], p1_gp[1], (0,255,0), "Shaft")
-                elif p['type'] == 'arm_left' and not pd.isna(row['LX_Smooth']):
-                    draw_dynamic_visuals_with_compass(img, (int(row['LX_Smooth']), int(row['LY_Smooth'])), row['LA_Smooth'], ref_len*0.8, p1_gp[0], p1_gp[1], (0,255,0), "Lt Arm")
-                elif p['type'] == 'arm_right' and not pd.isna(row['RX_Smooth']):
-                    draw_dynamic_visuals_with_compass(img, (int(row['RX_Smooth']), int(row['RY_Smooth'])), row['RA_Smooth'], ref_len*0.8, p1_gp[0], p1_gp[1], (0,255,0), "Rt Arm")
+                if row is not None:
+                    wx, wy = int(row['WX_Smooth']), int(row['WY_Smooth'])
+                    
+                    if p['type'] == 'shaft':
+                        draw_dynamic_visuals_with_compass(img, (wx, wy), row['SA_Smooth'], ref_len, p1_gp[0], p1_gp[1], (0,255,0), "Shaft")
+                    elif p['type'] == 'arm_left' and not pd.isna(row['LX_Smooth']):
+                        draw_dynamic_visuals_with_compass(img, (int(row['LX_Smooth']), int(row['LY_Smooth'])), row['LA_Smooth'], ref_len*0.8, p1_gp[0], p1_gp[1], (0,255,0), "Lt Arm")
+                    elif p['type'] == 'arm_right' and not pd.isna(row['RX_Smooth']):
+                        draw_dynamic_visuals_with_compass(img, (int(row['RX_Smooth']), int(row['RY_Smooth'])), row['RA_Smooth'], ref_len*0.8, p1_gp[0], p1_gp[1], (0,255,0), "Rt Arm")
 
                 status = "Pass"
-                if p['target'] is not None:
+                if row is not None and p['target'] is not None:
                     val = row['SA_Smooth'] if p['type'] == 'shaft' else (row['LA_Smooth'] if p['type'] == 'arm_left' else row['RA_Smooth'])
-                    if not pd.isna(val) and min(abs(val - p['target'])%360, 360-(abs(val - p['target'])%360)) > 7.0: 
-                        status = "Check"
-                        
-                st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption=f"[{p['phase']}] {p['name']} ({status})", use_column_width=True)
+                    if not pd.isna(val) and min(abs(val - p['target'])%360, 360-(abs(val - p['target'])%360)) > 7.0:
