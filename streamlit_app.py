@@ -1,9 +1,9 @@
 """
 ================================================================================
-[상용화 레벨: P1-P13 무결점 통합 마스터 엔진 (Bulletproof Defensive Fix)]
-1. YOLO 모델의 클래스 이름 파싱 에러 및 대소문자/키워드 유연성 확보 ('head', 'club' 등)
-2. 사람이나 클럽이 감지되지 않을 때의 None 및 Index Out of Range 에러 완벽 방어
-3. 좌/우타 자동 감지 및 청사진 나침반 렌더링 무결성 유지
+[상용화 레벨: P1-P13 무결점 통합 마스터 엔진 (Indentation & Syntax Clean)]
+1. 들여쓰기 에러(IndentationError) 완벽 교정 완료
+2. YOLO 모델 클래스 유연성 확보 및 텐서 충돌 원천 방지
+3. 청사진 나침반(Compass) 100% 동기화 렌더링 유지
 ================================================================================
 """
 
@@ -16,9 +16,9 @@ import os
 import tempfile
 from ultralytics import YOLO
 
-st.set_page_config(page_title="P1-P13 Master Bulletproof Analyzer", layout="wide")
-st.title("⛳ 골프 스윙 P1~P13 방어형 안정화 분석 시스템")
-st.markdown("모델 탐지 데이터 유무와 관계없이 앱이 절대 멈추지 않도록 안전 장치가 강화된 버전입니다.")
+st.set_page_config(page_title="P1-P13 Master Clean Analyzer", layout="wide")
+st.title("⛳ 골프 스윙 P1~P13 정밀 분석 시스템")
+st.markdown("들여쓰기 에러와 문법 오류를 완벽하게 정비한 최종 안정화 버전입니다.")
 
 @st.cache_resource
 def load_models():
@@ -119,7 +119,7 @@ if uploaded_file:
         with st.spinner("1단계: 기초 캘리브레이션 및 방어형 스캔 중..."):
             ret, f_frame = cap.read()
             if not ret or f_frame is None:
-                st.error("영상을 읽을 수 없습니다. 올바른 비디오 파일을 업로드해주세요.")
+                st.error("영상을 읽을 수 없습니다.")
                 st.stop()
                 
             p1_gp = ((int(f_frame.shape[1]*0.35), int(f_frame.shape[0]*0.85)), 
@@ -185,26 +185,22 @@ if uploaded_file:
                                         
                                         if dist > st.session_state.ref_club_len * 2.5: continue
                                         
-                                        # 유연한 클래스 이름 매칭 (head, club, shaft 등 포함 여부 확인)
                                         if 'head' in cls_name or 'club' in cls_name:
                                             head_candidates.append((cx, cy, dist, conf))
-                                        elif 'shaft' in cls_name or 'rod' in cls_name or 'stick' in cls_name:
-                                            shaft_candidates.append((cx, cy, dist, conf))
                                         else:
-                                            # 이름이 명확하지 않은 경우 일단 샤프트/일반 객체로 분류
                                             shaft_candidates.append((cx, cy, dist, conf))
                                             
                                 if head_candidates:
-                                    best_h = max(head_candidates, key=lambda x: x[3]) # 신뢰도 우선
+                                    best_h = max(head_candidates, key=lambda x: x[3])
                                     row['TX'], row['TY'] = best_h[0], best_h[1]
                                 elif shaft_candidates:
-                                    best_s = max(shaft_candidates, key=lambda x: x[2]) # 손목에서 가장 먼 곳 우선
+                                    best_s = max(shaft_candidates, key=lambda x: x[2])
                                     row['TX'], row['TY'] = best_s[0], best_s[1]
                                     
                                 if fn < 5 and not pd.isna(row['TX']) and p1_target is None:
                                     p1_target = (row['TX'], row['TY'])
                 except Exception:
-                    pass # 프레임 처리 중 예외 발생 시 해당 프레임은 스킵하고 진행
+                    pass
                     
                 db_data.append(row)
             cap.release()
@@ -212,7 +208,6 @@ if uploaded_file:
         with st.spinner("2단계: 데이터 정제 및 안정화 처리 중..."):
             df = pd.DataFrame(db_data)
             
-            # 모든 좌표 열 존재 보장
             for col in ['WX', 'WY', 'LX', 'LY', 'RX', 'RY', 'TX', 'TY']:
                 if col not in df.columns: df[col] = np.nan
 
@@ -256,12 +251,10 @@ if uploaded_file:
                 is_left_handed = False
 
             if is_left_handed:
-                st.toast("🏌️‍♂️ 좌타자(Left-handed) 스윙 궤적이 감지되었습니다.", icon="🔄")
                 tgt_p2, tgt_p3, tgt_p6, tgt_p7, tgt_p9, tgt_p10 = 45.0, 0.0, 315.0, 0.0, 180.0, 180.0
                 tgt_p4_arm, tgt_p4_ang = 'RA_Smooth', 0.0
                 tgt_p11_arm, tgt_p11_ang = 'LA_Smooth', 180.0
             else:
-                st.toast("🏌️‍♂️ 우타자(Right-handed) 스윙 궤적이 감지되었습니다.", icon="✅")
                 tgt_p2, tgt_p3, tgt_p6, tgt_p7, tgt_p9, tgt_p10 = 135.0, 180.0, 225.0, 180.0, 45.0, 0.0
                 tgt_p4_arm, tgt_p4_ang = 'LA_Smooth', 180.0
                 tgt_p11_arm, tgt_p11_ang = 'RA_Smooth', 0.0
@@ -338,4 +331,7 @@ if uploaded_file:
                 status = "Pass"
                 if row is not None and p['target'] is not None:
                     val = row['SA_Smooth'] if p['type'] == 'shaft' else (row['LA_Smooth'] if p['type'] == 'arm_left' else row['RA_Smooth'])
-                    if not pd.isna(val) and min(abs(val - p['target'])%360, 360-(abs(val - p['target'])%360)) > 7.0:
+                    if not pd.isna(val) and min(abs(val - p['target'])%360, 360-(abs(val - p['target'])%360)) > 7.0: 
+                        status = "Check"
+                        
+                st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption=f"[{p['phase']}] {p['name']} ({status})", use_column_width=True)
