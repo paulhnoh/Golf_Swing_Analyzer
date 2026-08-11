@@ -253,11 +253,14 @@ if uploaded_file:
                                 if wx_start is None: wx_start, wy_start = row['WX'], row['WY']
 
                                 # --- 클럽 위치 예측 (칼만) ---
+                                reacquiring = (kf_club is None)
                                 if kf_club is None:
-                                    # 아직 한 번도 못 잡았으면 손목 위치를 기준으로 탐색 시작
+                                    # 아직 한 번도 못 잡았거나 락을 잃은 직후: 손목 위치를 기준으로 넓게 재탐색
+                                    # (팔로우스루/피니시처럼 클럽이 몸에서 멀리 떨어져 있는 자세도 커버하도록
+                                    #  탐색 반경을 프레임 크기의 40%대까지 넓히고, 신뢰도 임계값도 완화한다.
+                                    #  락이 없을 때의 오탐은 다음 프레임에서 거리 게이팅으로 걸러지므로 부담이 적다)
                                     pred_x, pred_y = row['WX'], row['WY']
-                                    # 최초 락 획득 전에는 탐색 범위를 넉넉하게 잡아 빨리 잡히게 함
-                                    cur_radius = max(roi_half * 1.8, min(frame_w_ref, frame_h_ref) * 0.30)
+                                    cur_radius = max(roi_half * 2.2, min(frame_w_ref, frame_h_ref) * 0.42)
                                 else:
                                     pred = kf_club.predict()
                                     pred_x, pred_y = float(pred[0, 0]), float(pred[1, 0])
@@ -267,9 +270,13 @@ if uploaded_file:
                                     # 놓친 프레임이 누적되면 탐색 반경을 점진적으로 넓혀 재포착 확률을 높임
                                     cur_radius = roi_half * (1.0 + min(miss_streak, 6) * 0.25)
 
+                                # 락이 없는(재탐색) 상태에서는 신뢰도 임계값을 완화해 recall을 우선시한다.
+                                # (오탐이 섞여도 다음 프레임부터 칼만 거리 게이팅으로 곧 걸러짐)
+                                effective_conf = max(0.05, conf_th * 0.6) if reacquiring else conf_th
+
                                 meas = detect_club_in_roi(frame, custom_model, pred_x, pred_y,
                                                            cur_radius, row['WX'], row['WY'],
-                                                           conf_th, det_imgsz)
+                                                           effective_conf, det_imgsz)
 
                                 if meas is not None:
                                     mx, my = meas
@@ -368,9 +375,10 @@ if uploaded_file:
                 combined_disp = wrist_disp.fillna(999.0) + club_disp.fillna(0.0) * 0.5
 
                 p13 = tot_frames - 1
-                for idx in range(search_start, max(search_start, tot_frames - 2)):
-                    window = combined_disp.iloc[idx: idx + 3]
-                    if len(window) == 3 and (window < still_px_th).all():
+                STILL_WINDOW = 5   # 3프레임은 팔로우스루 중 짧은 멈칫함에도 오탐될 수 있어 5프레임으로 강화
+                for idx in range(search_start, max(search_start, tot_frames - STILL_WINDOW - 1)):
+                    window = combined_disp.iloc[idx: idx + STILL_WINDOW]
+                    if len(window) == STILL_WINDOW and (window < still_px_th).all():
                         p13 = idx
                         break
             except Exception:
@@ -420,7 +428,7 @@ if uploaded_file:
             auto_f = {"P1": p1, "P5": p5, "P8": p8, "P12": p12, "P13": p13}
             auto_f["P2"] = find_closest_frame(df, 'SA_Smooth', tgt_p2, p1, p5)
             auto_f["P3"] = find_closest_frame(df, 'SA_Smooth', tgt_p3, auto_f["P2"], p5)
-            auto_f["P4"] = find_closest_frame(df, tgt_p4_arm, tgt_p4_ang, p1, p5)
+            auto_f["P4"] = find_closest_frame(df, tgt_p4_arm, tgt_p4_ang, auto_f["P3"], p5)
             
             auto_f["P6"] = find_closest_frame(df, 'SA_Smooth', tgt_p6, p5, p8)
             auto_f["P7"] = find_closest_frame(df, 'SA_Smooth', tgt_p7, auto_f["P6"], p8)
