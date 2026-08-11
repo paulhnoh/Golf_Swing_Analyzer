@@ -226,6 +226,8 @@ if uploaded_file:
             frame_w_ref = int(f_frame.shape[1])
             frame_h_ref = int(f_frame.shape[0])
             debug_detect_log = []   # 진단 패널용: 프레임별 탐지 성공 여부 기록
+            pending_candidate = None  # 락 확정 전 "가(假) 후보" 위치 (오탐 방지용)
+            pending_count = 0
 
             for fn in range(tot_frames):
                 ret, frame = cap.read()
@@ -281,13 +283,31 @@ if uploaded_file:
                                 if meas is not None:
                                     mx, my = meas
                                     if kf_club is None:
-                                        kf_club = create_kalman_2d(mx, my)
+                                        # 락이 아직 없으면 바로 확정하지 않고, 연속으로 비슷한 위치에서
+                                        # 잡혀야만 확정한다 (배경/몸통 등 1회성 오탐이 락을 가로채는 것을 방지)
+                                        if pending_candidate is not None and \
+                                           math.hypot(mx - pending_candidate[0], my - pending_candidate[1]) < cur_radius * 0.5:
+                                            pending_count += 1
+                                        else:
+                                            pending_candidate = (mx, my)
+                                            pending_count = 1
+
+                                        if pending_count >= 2:
+                                            kf_club = create_kalman_2d(mx, my)
+                                            pending_candidate, pending_count = None, 0
+                                            row['TX'], row['TY'] = mx, my
+                                            row['T_Predicted'] = False
+                                            miss_streak = 0
+                                            det_status = 'detected'
+                                        else:
+                                            # 아직 확정 전 (tentative) - 이번 프레임 값은 채우지 않고 다음 프레임 확인을 기다림
+                                            det_status = 'pending'
                                     else:
                                         kf_club.correct(np.array([[np.float32(mx)], [np.float32(my)]]))
-                                    row['TX'], row['TY'] = mx, my
-                                    row['T_Predicted'] = False
-                                    miss_streak = 0
-                                    det_status = 'detected'
+                                        row['TX'], row['TY'] = mx, my
+                                        row['T_Predicted'] = False
+                                        miss_streak = 0
+                                        det_status = 'detected'
                                 elif kf_club is not None and miss_streak < MAX_MISS_STREAK:
                                     # 탐지 실패해도 직전 속도 기반 예측치로 채워서 궤적이 끊기지 않게 함
                                     row['TX'], row['TY'] = pred_x, pred_y
@@ -451,14 +471,14 @@ if uploaded_file:
                 total = len(dbg)
                 n_det = int((dbg['status'] == 'detected').sum())
                 n_pred = int((dbg['status'] == 'predicted').sum())
-                n_lost = int((dbg['status'] == 'lost').sum())
+                n_lost = int(dbg['status'].isin(['lost', 'pending']).sum())
                 c1, c2, c3 = st.columns(3)
                 c1.metric("실측 탐지", f"{n_det}/{total}", f"{n_det/total*100:.0f}%")
                 c2.metric("칼만 예측으로 보완", f"{n_pred}/{total}", f"{n_pred/total*100:.0f}%")
-                c3.metric("완전 미탐지(락 상실)", f"{n_lost}/{total}", f"{n_lost/total*100:.0f}%")
+                c3.metric("완전 미탐지(락 상실/확인대기)", f"{n_lost}/{total}", f"{n_lost/total*100:.0f}%")
 
-                # 연속 미탐지(lost) 구간을 찾아 프레임 범위로 보여줌 -> 실측값과 대조하기 쉬움
-                lost_mask = (dbg['status'] == 'lost').to_numpy()
+                # 연속 미탐지(lost/pending) 구간을 찾아 프레임 범위로 보여줌 -> 실측값과 대조하기 쉬움
+                lost_mask = dbg['status'].isin(['lost', 'pending']).to_numpy()
                 ranges = []
                 start = None
                 for i, v in enumerate(lost_mask):
