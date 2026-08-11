@@ -1,11 +1,11 @@
 """
 ================================================================================
-[상용화 레벨: P1-P13 무결점 통합 마스터 엔진 (Ghost Hunter & Vector Smooth)]
-1. Static Blacklist (고스트 헌터): 화면에 고정된 얼룩이나 디봇을 클럽으로 오인하여 
-   발생한 '21.3도의 저주'를 원천 차단. (다중 패스 스캔 기반)
-2. Sin/Cos Vector Interpolation: 360도 경계선(0도와 359도)에서 각도가 튀는 것을
-   완벽히 방지하는 수학적 스무딩 적용.
-3. Right-Handed Blueprint: 우측=180, 좌측=0 체계의 타겟 프레임 완벽 탐색.
+[상용화 레벨: P1-P13 무결점 통합 마스터 엔진 (Memory Crash Fix)]
+1. Robust State Check: Streamlit의 핫리로딩(Hot-reloading) 시 메모리 잔존으로 인한
+   AttributeError(변수 증발) 충돌을 완벽히 방어하는 전수 검사 로직 적용.
+2. Static Blacklist (고스트 헌터): 화면에 고정된 21.3도 얼룩이나 디봇을 클럽으로 오인 방지.
+3. Sin/Cos Vector Interpolation: 360도 경계선에서 각도가 튀는 것을 막는 수학적 스무딩.
+4. Right-Handed Blueprint: 우측=180, 좌측=0 체계의 타겟 프레임 완벽 탐색 및 나침반 렌더링.
 ================================================================================
 """
 
@@ -18,9 +18,9 @@ import os
 import tempfile
 from ultralytics import YOLO
 
-st.set_page_config(page_title="P1-P13 Blueprint Compass Analyzer", layout="wide")
-st.title("⛳ 골프 스윙 P1~P13 고스트 헌터 & 청사진 정밀 분석 시스템")
-st.markdown("배경 오인식(21.3도의 저주)을 완벽히 척결하고 수학적 궤적을 100% 동기화시킨 상용화 버전입니다.")
+st.set_page_config(page_title="P1-P13 Master Compass Analyzer", layout="wide")
+st.title("⛳ 골프 스윙 P1~P13 청사진(Compass) 정밀 분석 시스템")
+st.markdown("메모리 충돌(AttributeError)을 완벽히 방어하는 상용화 안정성 100% 버전입니다.")
 
 @st.cache_resource
 def load_models():
@@ -123,11 +123,16 @@ def draw_dynamic_visuals_with_compass(img, vertex, angle, length, gp1, gp2, colo
 uploaded_file = st.file_uploader("스윙 영상 업로드 (MP4, MOV)", type=['mp4', 'mov', 'avi'])
 
 if uploaded_file:
+    # 파일이 변경되면 캐시 초기화
     if 'curr_file' not in st.session_state or st.session_state.curr_file != uploaded_file.name:
         st.session_state.clear()
         st.session_state.curr_file = uploaded_file.name
 
-    if 'scan_done' not in st.session_state:
+    # 💡 [핵심 버그 수정] 단순히 scan_done만 보지 않고 필수 변수가 전부 있는지 전수 검사
+    req_keys = ['scan_done', 'df', 'frame_dir', 'p1_gp', 'ref_club_len', 'auto_f', 'tot_frames']
+    needs_processing = any(k not in st.session_state for k in req_keys)
+
+    if needs_processing:
         tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
         tfile.write(uploaded_file.read())
         frame_dir = tempfile.mkdtemp()
@@ -158,11 +163,10 @@ if uploaded_file:
                         break
             st.session_state.ref_club_len = ref_club_len
 
-        with st.spinner("2단계: 데이터 전수 추출 및 고스트(배경 얼룩) 헌터 스캔 중..."):
+        with st.spinner("2단계: 데이터 전수 추출 및 고스트 헌터 스캔 중..."):
             db_data = []
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             
-            # 모든 프레임의 박스 좌표 수집 (고스트 필터링용)
             for fn in range(tot_frames):
                 ret, frame = cap.read()
                 if not ret: break
@@ -190,17 +194,15 @@ if uploaded_file:
                 db_data.append(row)
             cap.release()
 
-            # 💡 [핵심] 화면에 계속 멈춰있는 21.3도 얼룩(고스트) 블랙리스트 생성
+            # 고스트(화면에 멈춰있는 얼룩) 블랙리스트 생성
             all_boxes = [box for row in db_data for box in row['raw_boxes']]
             static_blacklist = []
             for pt in all_boxes:
-                # 15% 이상 프레임에서 거의 동일한 위치에 검출되면 배경 얼룩으로 간주
                 if sum(1 for p in all_boxes if math.hypot(p[0]-pt[0], p[1]-pt[1]) < 15) > (tot_frames * 0.15):
                     if not any(math.hypot(p[0]-pt[0], p[1]-pt[1]) < 15 for p in static_blacklist):
                         static_blacklist.append(pt)
 
             p1_target = None
-            # 블랙리스트를 제외한 진짜 클럽 헤드만 타겟으로 저장
             for i, row in enumerate(db_data):
                 wx, wy = row['WX'], row['WY']
                 if pd.isna(wx): continue
@@ -209,9 +211,7 @@ if uploaded_file:
                 for cx, cy in row['raw_boxes']:
                     dist = math.hypot(cx - wx, cy - wy)
                     if not ((ref_club_len * 0.5) < dist < (ref_club_len * 1.5)): continue
-                    # 고스트 얼룩 제외
                     if any(math.hypot(cx - bp[0], cy - bp[1]) < 20 for bp in static_blacklist): continue
-                    # 손이 높은데 타겟이 바닥(P1 공 위치)에 있으면 티(Tee)로 간주
                     if p1_target and i > 10 and wy < p1_gp[0][1] - 100:
                         if math.hypot(cx - p1_target[0], cy - p1_target[1]) < 40: continue
                             
@@ -227,13 +227,12 @@ if uploaded_file:
                 db_data[i]['LA'] = compute_angle((row['LX'], row['LY']), (wx, wy), p1_gp[0], p1_gp[1])
                 db_data[i]['RA'] = compute_angle((row['RX'], row['RY']), (wx, wy), p1_gp[0], p1_gp[1])
 
-        with st.spinner("3단계: Sin/Cos 수학적 보간 및 뼈대 시퀀스 록인 중..."):
+        with st.spinner("3단계: Sin/Cos 보간 및 뼈대 시퀀스 록인 중..."):
             df = pd.DataFrame(db_data)
             df[['WX', 'WY', 'LX', 'LY', 'RX', 'RY']] = df[['WX', 'WY', 'LX', 'LY', 'RX', 'RY']].interpolate(limit_direction='both')
             df['WX_Smooth'] = df['WX'].rolling(window=7, min_periods=1, center=True).mean()
             df['WY_Smooth'] = df['WY'].rolling(window=7, min_periods=1, center=True).mean()
             
-            # 💡 [핵심] 360도 왜곡을 막는 완벽한 Sin/Cos 보간 및 스무딩
             for col in ['SA', 'LA', 'RA']:
                 df[f'{col}_Sin'] = np.sin(np.radians(df[col]))
                 df[f'{col}_Cos'] = np.cos(np.radians(df[col]))
@@ -241,18 +240,18 @@ if uploaded_file:
                 df[f'{col}_Cos'] = df[f'{col}_Cos'].interpolate(limit_direction='both').rolling(5, min_periods=1, center=True).mean()
                 df[f'{col}_Smooth'] = np.degrees(np.arctan2(df[f'{col}_Sin'], df[f'{col}_Cos'])) % 360
 
-            # V-Curve 뼈대 추출
+            # V-Curve 뼈대 (Top, Impact, Finish)
             p5 = int(df['WY_Smooth'].iloc[:int(tot_frames * 0.65)].idxmin())
             p12 = int(df['WY_Smooth'].iloc[p5 + 15 :].idxmin()) if len(df.iloc[p5 + 15 :]) > 0 else tot_frames - 1
             sub_imp = df['WY_Smooth'].iloc[p5 + 5 : p12 - 5]
             p8 = int(sub_imp.idxmax()) if not sub_imp.empty else p5 + (p12 - p5) // 2
             
-            # 어드레스(P1) 모션 감지
+            # P1 어드레스 모션 감지
             wx_avg_start = df['WX_Smooth'].iloc[0:5].mean()
             p1_mask = (df['WX_Smooth'].iloc[:p5] - wx_avg_start).abs() > 3.0
             p1 = int(p1_mask.idxmax()) if p1_mask.any() else 0
 
-            # 완벽히 교정된 타겟 탐색
+            # 청사진 기반 타임라인
             auto_f = {"P1": p1, "P5": p5, "P8": p8, "P12": p12, "P13": tot_frames - 1}
             auto_f["P2"] = find_closest_frame(df, 'SA_Smooth', 135.0, p1, p5)
             auto_f["P3"] = find_closest_frame(df, 'SA_Smooth', 180.0, auto_f["P2"], p5)
@@ -265,11 +264,14 @@ if uploaded_file:
             auto_f["P10"] = find_closest_frame(df, 'SA_Smooth', 0.0, auto_f["P9"], p12)
             auto_f["P11"] = find_closest_frame(df, 'RA_Smooth', 0.0, auto_f["P10"], p12)
 
+            st.session_state.df = df
+            st.session_state.frame_dir = frame_dir
+            st.session_state.tot_frames = tot_frames
             st.session_state.auto_f = auto_f
             st.session_state.scan_done = True
 
-    if 'scan_done' in st.session_state:
-        st.subheader("📸 청사진(Compass) 100% 동기화 분석 뷰")
+    if 'scan_done' in st.session_state and 'df' in st.session_state:
+        st.subheader("📸 청사진 나침반(Compass) 100% 동기화 분석 뷰")
         cols = st.columns(4)
         df, frame_dir = st.session_state.df, st.session_state.frame_dir
         p1_gp = st.session_state.p1_gp
