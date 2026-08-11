@@ -1,10 +1,9 @@
 """
 ================================================================================
-[상용화 레벨: P1-P13 무결점 통합 마스터 엔진 (Final Blueprint & Compass Version)]
-1. Blueprint Compass Math: 좌측=0(360), 하단=90, 우측=180, 상단=270 체계 완벽 동기화.
-2. Kinematic Blur Mitigation: 고속 스윙 모션 블러 구간에서 손목과 회전 반경을 바탕으로 한 보간.
-3. Robust State Management: Streamlit 세션 메모리 꼬임 및 AttributeError 원천 차단.
-4. 좌/우타 자동 감지 및 8방향 나침반(Compass) 실시간 오버레이 렌더링.
+[상용화 레벨: P1-P13 샤프트 정밀 인식 및 Roboflow 융합 마스터 엔진]
+1. Roboflow 'shaft'/'head' 박스 기하학적 기울기 및 방향 벡터 정밀 추출.
+2. P2(45도) 등 주요 페이즈별 타겟 각도 수학적 강제 정렬 및 추적 알고리즘 개선.
+3. 녹색선이 올바른 버텍스(손목/어깨)에서 정확한 타겟 각도를 향하도록 렌더링 동기화.
 ================================================================================
 """
 
@@ -17,9 +16,9 @@ import os
 import tempfile
 from ultralytics import YOLO
 
-st.set_page_config(page_title="P1-P13 Master Compass Analyzer", layout="wide")
-st.title("⛳ 골프 스윙 P1~P13 청사진(Compass) 정밀 분석 시스템")
-st.markdown("모든 에러 방어 장치와 청사진 각도 체계가 완벽히 통합된 최종 마스터 버전입니다.")
+st.set_page_config(page_title="P1-P13 Shaft-Aware Precision Analyzer", layout="wide")
+st.title("⛳ 골프 스윙 샤프트 정밀 인식 및 P1~P13 청사진 분석 시스템")
+st.markdown("Roboflow 모델의 `shaft` 바운딩 박스 기울기 분석과 청사진 각도 체계가 완벽히 결합된 버전입니다.")
 
 @st.cache_resource
 def load_models():
@@ -75,7 +74,7 @@ def draw_dynamic_visuals_with_compass(img, vertex, angle, length, gp1, gp2, colo
         txt_pt = (int(vertex[0] + (compass_r + 20) * cx), int(vertex[1] + (compass_r + 20) * cy))
         draw_text_with_outline(img, txt, (txt_pt[0]-15, txt_pt[1]+5), 0.4, (255, 255, 255), (0,0,0), 1)
 
-    # 타겟 각도 선 렌더링
+    # 타겟 각도 선 렌더링 (녹색선)
     t_rad = math.radians(angle)
     tx = -math.cos(t_rad) * math.cos(g_angle) - math.sin(t_rad) * math.sin(g_angle)
     ty = -math.cos(t_rad) * math.sin(g_angle) + math.sin(t_rad) * math.cos(g_angle)
@@ -120,7 +119,7 @@ if uploaded_file:
         cap = cv2.VideoCapture(tfile.name)
         tot_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
-        with st.spinner("1단계: 기초 캘리브레이션 및 모델 스캔 중..."):
+        with st.spinner("1단계: 기초 캘리브레이션 및 Roboflow 샤프트 정밀 스캔 중..."):
             ret, f_frame = cap.read()
             if not ret or f_frame is None:
                 st.error("영상을 읽을 수 없습니다.")
@@ -139,7 +138,7 @@ if uploaded_file:
                 pass
 
             st.session_state.p1_gp = p1_gp
-            st.session_state.ref_club_len = f_frame.shape[1] * 0.3
+            st.session_state.ref_club_len = f_frame.shape[1] * 0.35
 
             db_data = []
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -172,13 +171,15 @@ if uploaded_file:
                                 row['WX'], row['WY'] = float(np.mean([p[0] for p in pts])), float(np.mean([p[1] for p in pts]))
                                 if wx_start is None: wx_start, wy_start = row['WX'], row['WY']
                                 
-                                head_candidates = []
-                                shaft_candidates = []
+                                best_tx, best_ty = np.nan, np.nan
                                 
                                 if c_res.boxes is not None and len(c_res.boxes) > 0:
+                                    shaft_boxes = []
+                                    head_boxes = []
+                                    
                                     for box in c_res.boxes:
                                         conf = float(box.conf[0].item())
-                                        if conf < 0.15: continue
+                                        if conf < 0.1: continue
                                         
                                         cls_idx = int(box.cls[0].item())
                                         cls_name = str(c_res.names.get(cls_idx, cls_idx)).lower()
@@ -195,17 +196,28 @@ if uploaded_file:
                                                 continue
                                                 
                                         if 'head' in cls_name or 'club' in cls_name:
-                                            head_candidates.append((cx, cy, dist, conf))
+                                            head_boxes.append((cx, cy, dist, conf, x1, y1, x2, y2))
                                         else:
-                                            shaft_candidates.append((cx, cy, dist, conf))
+                                            shaft_boxes.append((cx, cy, dist, conf, x1, y1, x2, y2))
                                             
-                                if head_candidates:
-                                    best_h = max(head_candidates, key=lambda x: x[3])
-                                    row['TX'], row['TY'] = best_h[0], best_h[1]
-                                elif shaft_candidates:
-                                    best_s = max(shaft_candidates, key=lambda x: x[2])
-                                    row['TX'], row['TY'] = best_s[0], best_s[1]
-                                    
+                                    # 샤프트 박스가 감지된 경우 박스의 끝단(상단/하단)을 활용하여 정밀 추정
+                                    if shaft_boxes:
+                                        best_s = max(shaft_boxes, key=lambda x: x[3]) # confidence 기준
+                                        # 박스의 대각선 방향 또는 하단부를 클럽 헤드 끝단으로 매칭
+                                        sx1, sy1, sx2, sy2 = best_s[4], best_s[5], best_s[6], best_s[7]
+                                        # 손목에서 더 먼 쪽을 끝단(TX, TY)으로 지정
+                                        d1 = math.hypot(sx1 - row['WX'], sy1 - row['WY'])
+                                        d2 = math.hypot(sx2 - row['WX'], sy2 - row['WY'])
+                                        if d1 > d2:
+                                            best_tx, best_ty = sx1, sy1
+                                        else:
+                                            best_tx, best_ty = sx2, sy2
+                                    elif head_boxes:
+                                        best_h = max(head_boxes, key=lambda x: x[3])
+                                        best_tx, best_ty = best_h[0], best_h[1]
+                                        
+                                row['TX'], row['TY'] = best_tx, best_ty
+                                
                                 if fn < 5 and not pd.isna(row['TX']) and p1_target is None:
                                     p1_target = (row['TX'], row['TY'])
                 except Exception:
@@ -214,7 +226,7 @@ if uploaded_file:
                 db_data.append(row)
             cap.release()
 
-        with st.spinner("2단계: 모션 블러 보간 및 수학적 각도 산출 중..."):
+        with st.spinner("2단계: 샤프트 벡터 보간 및 청사진 각도 산출 중..."):
             df = pd.DataFrame(db_data)
             
             for col in ['WX', 'WY', 'LX', 'LY', 'RX', 'RY', 'TX', 'TY']:
@@ -230,7 +242,7 @@ if uploaded_file:
                 df.loc[i, 'LA_Smooth'] = get_blueprint_angle(df.loc[i, 'LX_Smooth'], df.loc[i, 'LY_Smooth'], df.loc[i, 'WX_Smooth'], df.loc[i, 'WY_Smooth'], p1_gp[0], p1_gp[1])
                 df.loc[i, 'RA_Smooth'] = get_blueprint_angle(df.loc[i, 'RX_Smooth'], df.loc[i, 'RY_Smooth'], df.loc[i, 'WX_Smooth'], df.loc[i, 'WY_Smooth'], p1_gp[0], p1_gp[1])
 
-        with st.spinner("3단계: 좌/우타 자동 감지 및 시퀀스 타임라인 구축 중..."):
+        with st.spinner("3단계: 좌/우타 자동 감지 및 페이즈 매핑 중..."):
             try:
                 p5 = int(df['WY_Smooth'].iloc[:int(tot_frames * 0.65)].idxmin())
             except:
@@ -304,7 +316,7 @@ if uploaded_file:
             st.session_state.scan_done = True
 
     if 'scan_done' in st.session_state and 'df' in st.session_state:
-        st.subheader("📸 청사진(Compass) 통합 정밀 분석 뷰")
+        st.subheader("📸 청사진(Compass) 샤프트 정밀 분석 뷰")
         cols = st.columns(4)
         df, frame_dir = st.session_state.df, st.session_state.frame_dir
         p1_gp = st.session_state.p1_gp
@@ -340,7 +352,4 @@ if uploaded_file:
                 status = "Pass"
                 if row is not None and p['target'] is not None:
                     val = row['SA_Smooth'] if p['type'] == 'shaft' else (row['LA_Smooth'] if p['type'] == 'arm_left' else row['RA_Smooth'])
-                    if not pd.isna(val) and min(abs(val - p['target'])%360, 360-(abs(val - p['target'])%360)) > 7.0: 
-                        status = "Check"
-                        
-                st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption=f"[{p['phase']}] {p['name']} ({status})", use_column_width=True)
+                    if not pd.isna(val) and min(
