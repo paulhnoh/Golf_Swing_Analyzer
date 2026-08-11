@@ -1,12 +1,10 @@
 """
 ================================================================================
-[상용화 레벨: P1-P13 청사진 100% 동기화 & 티-트랩(Tee-Trap) 마스터 엔진]
-1. Tee-Trap Filter: 스윙 중 AI가 바닥의 공(Ball/Tee)을 클럽 헤드로 오인하여 
-   각도가 90도 근처에 갇히는(Lock-on) 치명적 오류 완벽 차단.
-2. Furthest Point Lock: 샤프트 중간이 아닌 클럽 끝단(헤드)을 정확히 잡기 위해
-   손목에서 가장 먼 거리에 있는 객체를 우선순위로 추적.
-3. Blueprint Math 100%: 대표님의 각도 청사진(좌=0, 하=90, 우=180, 상=270) 수학 적용.
-4. Auto-Detect Handedness: 백스윙 방향에 따른 좌타/우타 자동 감지 및 타겟 반전.
+[상용화 레벨: P1-P13 무결점 통합 마스터 엔진 (Head-Class Priority Fix)]
+1. Head-Class Priority: custom_golf.pt 모델이 제공하는 'head'(클럽 헤드) 클래스를 
+   최우선으로 록인하여, 샤프트 중간이나 잔상을 헤드로 오인하는 현상 원천 차단.
+2. 좌/우타 자동 감지 및 청사진(Left=0, Right=180) 나침반 렌더링 완벽 유지.
+3. V-Curve 뼈대 록인 및 좌표 스무딩을 통한 타임라인 붕괴 방지.
 ================================================================================
 """
 
@@ -19,9 +17,9 @@ import os
 import tempfile
 from ultralytics import YOLO
 
-st.set_page_config(page_title="P1-P13 Master Auto-Detect Analyzer", layout="wide")
-st.title("⛳ 골프 스윙 P1~P13 청사진 100% 동기화 정밀 분석 시스템")
-st.markdown("바닥의 공(Tee)을 클럽으로 오인하는 오류를 원천 차단하여 청사진 궤적을 100% 추적합니다.")
+st.set_page_config(page_title="P1-P13 Master Head-Priority Analyzer", layout="wide")
+st.title("⛳ 골프 스윙 P1~P13 클럽 헤드 클래스 우선 추적 시스템")
+st.markdown("AI 모델의 'head' 클래스를 직접 타겟팅하여 샤프트 튐 현상을 완벽히 해결한 버전입니다.")
 
 @st.cache_resource
 def load_models():
@@ -30,7 +28,7 @@ def load_models():
 pose_model, custom_model = load_models()
 
 def get_blueprint_angle(x1, y1, x2, y2, gp1, gp2):
-    """💡 [핵심] 대표님의 청사진(Left=0, Down=90, Right=180, Up=270) 수학 공식 100% 적용"""
+    """청사진(Left=0, Down=90, Right=180, Up=270) 수학 공식"""
     if pd.isna(x1) or pd.isna(x2): return np.nan
     if gp1[0] > gp2[0]: gp1, gp2 = gp2, gp1
     
@@ -38,11 +36,10 @@ def get_blueprint_angle(x1, y1, x2, y2, gp1, gp2):
     dx = x2 - x1
     dy = y2 - y1
     
-    # 지면 기울기 보정 및 좌/우 반전(청사진 동기화)
     dx_rot = dx * math.cos(-g_angle) - dy * math.sin(-g_angle)
     dy_rot = dx * math.sin(-g_angle) + dy * math.cos(-g_angle)
     
-    t_angle = math.atan2(dy_rot, -dx_rot) # -dx_rot을 통해 좌측을 0(360)으로 강제
+    t_angle = math.atan2(dy_rot, -dx_rot)
     val = math.degrees(t_angle)
     if val < 0: val += 360
     return round(val, 1)
@@ -60,12 +57,10 @@ def draw_text_with_outline(img, text, pos, font_scale, text_color, outline_color
     cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, thickness, cv2.LINE_AA)
 
 def draw_dynamic_visuals_with_compass(img, vertex, angle, length, gp1, gp2, color, label):
-    """청사진 나침반 배경 및 동적 오버레이 렌더링"""
     if pd.isna(angle) or pd.isna(vertex[0]): return
     if gp1[0] > gp2[0]: gp1, gp2 = gp2, gp1
     g_angle = math.atan2(gp2[1] - gp1[1], gp2[0] - gp1[0])
     
-    # 1. 청사진 방위각(Compass) 8방향 렌더링
     compass_r = int(length * 0.9)
     for a in [0, 45, 90, 135, 180, 225, 270, 315]:
         a_rad = math.radians(a)
@@ -79,7 +74,6 @@ def draw_dynamic_visuals_with_compass(img, vertex, angle, length, gp1, gp2, colo
         txt_pt = (int(vertex[0] + (compass_r + 20) * cx), int(vertex[1] + (compass_r + 20) * cy))
         draw_text_with_outline(img, txt, (txt_pt[0]-15, txt_pt[1]+5), 0.4, (255, 255, 255), (0,0,0), 1)
 
-    # 2. 타겟 각도 렌더링
     t_rad = math.radians(angle)
     tx = -math.cos(t_rad) * math.cos(g_angle) - math.sin(t_rad) * math.sin(g_angle)
     ty = -math.cos(t_rad) * math.sin(g_angle) + math.sin(t_rad) * math.cos(g_angle)
@@ -89,7 +83,6 @@ def draw_dynamic_visuals_with_compass(img, vertex, angle, length, gp1, gp2, colo
     cv2.circle(img, target_pt, 6, (0, 0, 255), -1)
     cv2.line(img, vertex, target_pt, color, 4, cv2.LINE_AA)
     
-    # 3. 아크(Arc) 렌더링
     pts = []
     for i in range(max(5, int(angle / 4)) + 1):
         ca_rad = math.radians(i * (angle / max(5, int(angle / 4))) if angle > 0 else 0)
@@ -141,7 +134,7 @@ if uploaded_file:
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             
             wx_start, wy_start = None, None
-            p1_target = None # 어드레스 시점의 타겟(골프공) 위치 저장
+            p1_target = None
 
             for fn in range(tot_frames):
                 ret, frame = cap.read()
@@ -167,56 +160,60 @@ if uploaded_file:
                             row['WX'], row['WY'] = float(np.mean([p[0] for p in pts])), float(np.mean([p[1] for p in pts]))
                             if wx_start is None: wx_start, wy_start = row['WX'], row['WY']
                             
-                            # 💡 [핵심 방어] 티-트랩(Tee-Trap) 필터 및 최장거리(Furthest Point) 우선순위
-                            v_targets = []
+                            # 💡 [핵심] 'head'(클럽 헤드) 클래스를 최우선으로 탐색!
+                            head_candidates = []
+                            shaft_candidates = []
+                            
                             for box in c_res.boxes:
                                 conf = float(box.conf[0].item())
                                 if conf < 0.2: continue
+                                cls_name = c_res.names[int(box.cls[0])]
                                 
                                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                                 cx, cy = float((x1+x2)/2.0), float((y1+y2)/2.0)
                                 dist = math.hypot(cx - row['WX'], cy - row['WY'])
                                 
-                                # 거리 너무 멀면 아웃 (엉뚱한 사람 등)
-                                if dist > st.session_state.ref_club_len * 2.0: continue
+                                if dist > st.session_state.ref_club_len * 2.2: continue
                                 
-                                # 💡 공(Ball/Tee)에 록인되는 치명적 버그 완전 봉쇄!
-                                if p1_target is not None:
+                                # 공(Tee) 오인식 필터
+                                if p1_target is not None and fn > 10:
                                     hands_moved = math.hypot(row['WX'] - wx_start, row['WY'] - wy_start) > 30
-                                    # 손목이 움직였는데 타겟이 공(시작 위치) 근처라면 가짜로 판별!
-                                    if hands_moved and math.hypot(cx - p1_target[0], cy - p1_target[1]) < 40:
-                                        continue 
+                                    if hands_moved and math.hypot(cx - p1_target[0], cy - p1_target[1]) < 45:
+                                        continue
                                         
-                                v_targets.append((cx, cy, dist, conf))
+                                if cls_name == 'head':
+                                    head_candidates.append((cx, cy, dist, conf))
+                                elif cls_name == 'shaft':
+                                    shaft_candidates.append((cx, cy, dist, conf))
                                     
-                            if v_targets:
-                                # 💡 샤프트 중심이 아닌 '클럽 끝단'을 잡기 위해 거리가 가장 먼 놈(x[2])을 선택
-                                best_t = max(v_targets, key=lambda x: x[2]) 
-                                row['TX'], row['TY'] = best_t[0], best_t[1]
+                            if head_candidates:
+                                # 신뢰도가 가장 높은 헤드 박스 선택
+                                best_h = max(head_candidates, key=lambda x: x[3])
+                                row['TX'], row['TY'] = best_h[0], best_h[1]
+                            elif shaft_candidates:
+                                # 헤드가 안 보이면 손목에서 가장 먼 샤프트 끝단 선택
+                                best_s = max(shaft_candidates, key=lambda x: x[2])
+                                row['TX'], row['TY'] = best_s[0], best_s[1]
                                 
-                                # 최초의 타겟(공/티) 좌표 기억
-                                if fn < 5 and p1_target is None:
-                                    p1_target = (best_t[0], best_t[1])
-                                    st.session_state.ref_club_len = best_t[2] if best_t[2] > 50 else st.session_state.ref_club_len
+                            if fn < 5 and not pd.isna(row['TX']) and p1_target is None:
+                                p1_target = (row['TX'], row['TY'])
                                 
                 db_data.append(row)
             cap.release()
 
-        with st.spinner("2단계: 데이터 스무딩 및 완벽한 수학적 궤적 산출 중..."):
+        with st.spinner("2단계: 좌표 스무딩 및 완벽한 수학적 궤적 산출 중..."):
             df = pd.DataFrame(db_data)
             df[['WX', 'WY', 'LX', 'LY', 'RX', 'RY', 'TX', 'TY']] = df[['WX', 'WY', 'LX', 'LY', 'RX', 'RY', 'TX', 'TY']].interpolate(limit_direction='both')
             
             for col in ['WX', 'WY', 'LX', 'LY', 'RX', 'RY', 'TX', 'TY']:
                 df[f'{col}_Smooth'] = df[col].rolling(window=5, min_periods=1, center=True).mean()
 
-            # 스무딩된 절대 좌표를 바탕으로 튀지 않는 완벽한 청사진 각도 계산
             for i in df.index:
                 df.loc[i, 'SA_Smooth'] = get_blueprint_angle(df.loc[i, 'WX_Smooth'], df.loc[i, 'WY_Smooth'], df.loc[i, 'TX_Smooth'], df.loc[i, 'TY_Smooth'], p1_gp[0], p1_gp[1])
                 df.loc[i, 'LA_Smooth'] = get_blueprint_angle(df.loc[i, 'LX_Smooth'], df.loc[i, 'LY_Smooth'], df.loc[i, 'WX_Smooth'], df.loc[i, 'WY_Smooth'], p1_gp[0], p1_gp[1])
                 df.loc[i, 'RA_Smooth'] = get_blueprint_angle(df.loc[i, 'RX_Smooth'], df.loc[i, 'RY_Smooth'], df.loc[i, 'WX_Smooth'], df.loc[i, 'WY_Smooth'], p1_gp[0], p1_gp[1])
 
         with st.spinner("3단계: 좌/우타 자동 감지 및 시퀀스 타임라인 구축 중..."):
-            # V-Curve 뼈대 구축
             p5 = int(df['WY_Smooth'].iloc[:int(tot_frames * 0.65)].idxmin())
             p12 = int(df['WY_Smooth'].iloc[p5 + 15 :].idxmin()) if len(df.iloc[p5 + 15 :]) > 0 else tot_frames - 1
             sub_imp = df['WY_Smooth'].iloc[p5 + 5 : p12 - 5]
@@ -226,7 +223,6 @@ if uploaded_file:
             p1_mask = (df['WX_Smooth'].iloc[:p5] - wx_start_avg).abs() > 3.0
             p1 = int(p1_mask.idxmax()) if p1_mask.any() else 0
 
-            # 좌타자/우타자 0.1초 자동 판별
             is_left_handed = df['WX_Smooth'].iloc[p5] < df['WX_Smooth'].iloc[p1]
 
             if is_left_handed:
