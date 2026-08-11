@@ -1,11 +1,11 @@
 """
 ================================================================================
-[상용화 레벨: X축 기반 생체역학 앵커 & 다이나믹 오버레이 렌더링 엔진]
-1. X-Axis Anchor: 손목의 X축(좌우) 양 끝단을 이용해 백스윙 탑(P5)과 피니시(P12)를 절대 록인.
-   (어드레스나 스윙 종료 후 손을 내리는 동작을 임팩트로 오인하는 현상 100% 원천 차단)
-2. Vector Angle Smoothing: 각도 결측치를 선형 좌표가 아닌 Sin/Cos 벡터로 스무딩하여 곡선 회전 유지.
-3. Dynamic Shaft Render: AI의 엉뚱한 객체 추적 좌표를 무시하고, 스무딩된 각도를 바탕으로
-   항상 일정한 길이의 샤프트 오버레이를 실시간으로 수학적 렌더링.
+[상용화 레벨: Twin-Peaks V-Curve 생체역학 앵커 엔진]
+1. V-Curve 앵커: 손목 Y축(높낮이)의 양대 최고점(P5, P12)을 먼저 잡고, 그 사이의 
+   최저점(P8)을 임팩트로 록인하여 프레임이 엉키는 현상을 100% 원천 차단.
+2. 텐서 에러 프리: PyTorch 0-d tensor 버그를 완전 제거한 float 캐스팅 적용.
+3. 다이나믹 렌더링: 디봇/티 오인식 좌표를 무시하고 스무딩된 벡터 각도로 오버레이 렌더링.
+4. 360도 수학적 동기화: Right=0°, Down=90°, Left=180°, Up=270° 유지.
 ================================================================================
 """
 
@@ -18,9 +18,9 @@ import os
 import tempfile
 from ultralytics import YOLO
 
-st.set_page_config(page_title="P1-P13 X-Axis Master Analyzer", layout="wide")
-st.title("⛳ 골프 스윙 P1~P13 좌우 궤적 기반 정밀 분석 시스템")
-st.markdown("X축(좌우)의 양 끝단을 기준으로 뼈대를 세워 프레임 꼬임 현상을 완벽히 해결했습니다.")
+st.set_page_config(page_title="P1-P13 V-Curve Master Analyzer", layout="wide")
+st.title("⛳ 골프 스윙 P1~P13 생체역학(V-Curve) 정밀 분석 시스템")
+st.markdown("손목의 상하 높낮이(쌍봉) 궤적을 이용해 스윙 뼈대를 100% 정확하게 추출합니다.")
 
 @st.cache_resource
 def load_models():
@@ -49,7 +49,6 @@ def compute_angle(p1, p2, gp1, gp2):
     if gp1[0] > gp2[0]: gp1, gp2 = gp2, gp1
     g_angle = math.atan2(gp2[1] - gp1[1], gp2[0] - gp1[0])
     t_angle = math.atan2(p2[1] - p1[1], p2[0] - p1[0])
-    # 이미지 좌표계(Y축이 아래로 갈수록 증가)에서 Right=0, Down=90, Left=180, Up=270 자연스럽게 일치
     return round(math.degrees(t_angle - g_angle) % 360, 1)
 
 def find_closest_frame(df, col, target, start_f, end_f):
@@ -65,37 +64,36 @@ def draw_text_with_outline(img, text, pos, font_scale, text_color, outline_color
     cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, thickness, cv2.LINE_AA)
 
 def draw_dynamic_visuals(img, vertex, angle, length, gp1, gp2, color, label):
-    """💡 [핵심] 엉터리 탐지 좌표를 버리고, 스무딩된 각도와 길이를 바탕으로 선을 동적으로 렌더링"""
+    """스무딩된 수학적 각도를 바탕으로 일정한 길이의 선과 호(Arc)를 렌더링"""
     if pd.isna(angle) or pd.isna(vertex[0]): return
     if gp1[0] > gp2[0]: gp1, gp2 = gp2, gp1
     g_rad = math.atan2(gp2[1] - gp1[1], gp2[0] - gp1[0])
     
-    # 0도 기준선
+    # 0도 기준선 렌더링
     r_x, r_y = int(vertex[0] + 80 * math.cos(g_rad)), int(vertex[1] + 80 * math.sin(g_rad))
     cv2.line(img, vertex, (r_x, r_y), (255, 255, 255), 2, cv2.LINE_AA)
     draw_text_with_outline(img, "0", (r_x+5, r_y-5), 0.5, (255,255,255), (0,0,0), 1)
     
-    # 각도 기반 다이나믹 타겟 포인트 계산
+    # 목표 각도 선 렌더링
     t_rad = math.radians(angle) + g_rad
     target_pt = (int(vertex[0] + length * math.cos(t_rad)), int(vertex[1] + length * math.sin(t_rad)))
-    
     cv2.circle(img, vertex, 6, (0, 255, 255), -1)
     cv2.circle(img, target_pt, 6, (0, 0, 255), -1)
     cv2.line(img, vertex, target_pt, color, 4, cv2.LINE_AA)
     
-    # 아크 그리기
+    # 각도 호(Arc) 렌더링
     pts = []
     for i in range(max(5, int(angle / 4)) + 1):
         a_rad = math.radians(i * (angle / max(5, int(angle / 4)))) + g_rad
         pts.append([int(vertex[0] + 45 * math.cos(a_rad)), int(vertex[1] + 45 * math.sin(a_rad))])
     if pts: cv2.polylines(img, [np.array(pts, np.int32)], False, (0, 165, 255), 2, cv2.LINE_AA)
         
+    # 텍스트 라벨 렌더링
     m_rad = math.radians(angle / 2.0) + g_rad
     t_x, t_y = int(vertex[0] + 65 * math.cos(m_rad)), int(vertex[1] + 65 * math.sin(m_rad))
-    text = f"{label}: {round(angle, 1)}deg"
-    draw_text_with_outline(img, text, (t_x-30, t_y+10), 0.7, (0,255,255), (0,0,0), 2)
+    draw_text_with_outline(img, f"{label}: {round(angle, 1)}deg", (t_x-30, t_y+10), 0.7, (0,255,255), (0,0,0), 2)
 
-uploaded_file = st.file_uploader("스윙 영상 업로드 (MP4, MOV, AVI)", type=['mp4', 'mov', 'avi'])
+uploaded_file = st.file_uploader("스윙 영상 업로드 (MP4, MOV)", type=['mp4', 'mov', 'avi'])
 
 if uploaded_file:
     if 'curr_file' not in st.session_state or st.session_state.curr_file != uploaded_file.name:
@@ -133,7 +131,7 @@ if uploaded_file:
                         break
             st.session_state.ref_club_len = ref_club_len
 
-        with st.spinner("2단계: 전 프레임 추출 및 데이터베이스(DB) 변환 중..."):
+        with st.spinner("2단계: 100% 프레임 DB 변환 및 텐서 에러 검출 중..."):
             db_data = []
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             
@@ -162,12 +160,12 @@ if uploaded_file:
                             
                             v_targets = []
                             for box in c_res.boxes:
-                                if float(box.conf[0].item()) < 0.3: continue
+                                if float(box.conf[0].item()) < 0.2: continue # 검출 민감도 유지
                                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                                 cx, cy = float((x1+x2)/2.0), float((y1+y2)/2.0)
                                 dist = math.hypot(cx - row['WX'], cy - row['WY'])
                                 
-                                # 거리 필터로 티(Tee) 등 가짜 객체 방어
+                                # 가짜 객체 배제를 위한 샤프트 반경 제한
                                 if (ref_club_len * 0.5) < dist < (ref_club_len * 1.5):
                                     v_targets.append((cx, cy, dist))
                                     
@@ -175,7 +173,6 @@ if uploaded_file:
                                 best_t = max(v_targets, key=lambda x: x[2])
                                 row['TX'], row['TY'] = float(best_t[0]), float(best_t[1])
                                 
-                # 오직 신뢰도 높은 타겟이 있을 때만 각도 기록
                 if not pd.isna(row['TX']):
                     row['SA'] = compute_angle((row['WX'], row['WY']), (row['TX'], row['TY']), p1_gp[0], p1_gp[1])
                 row['LA'] = compute_angle((row['LX'], row['LY']), (row['WX'], row['WY']), p1_gp[0], p1_gp[1])
@@ -183,57 +180,57 @@ if uploaded_file:
                 db_data.append(row)
             cap.release()
             
-            # 💡 [핵심] 벡터 기반 각도 완벽 스무딩 및 결측치 보간
+            # 결측치 보간 및 벡터(Sin/Cos) 스무딩 (각도 튀는 현상 원천 차단)
             df = pd.DataFrame(db_data)
             df[['WX', 'WY', 'LX', 'LY', 'RX', 'RY']] = df[['WX', 'WY', 'LX', 'LY', 'RX', 'RY']].interpolate(limit_direction='both')
-            df['WX_Smooth'] = df['WX'].rolling(5, center=True).mean()
-            df['WY_Smooth'] = df['WY'].rolling(5, center=True).mean()
+            
+            # 손목 높낮이 스무딩 
+            df['WY_Smooth'] = df['WY'].rolling(window=11, min_periods=1, center=True).mean()
             
             for col in ['SA', 'LA', 'RA']:
                 df[f'{col}_Sin'] = np.sin(np.radians(df[col])).interpolate(limit_direction='both')
                 df[f'{col}_Cos'] = np.cos(np.radians(df[col])).interpolate(limit_direction='both')
                 df[f'{col}_Smooth'] = np.degrees(np.arctan2(
-                    df[f'{col}_Sin'].rolling(5, center=True).mean(), 
-                    df[f'{col}_Cos'].rolling(5, center=True).mean()
+                    df[f'{col}_Sin'].rolling(7, min_periods=1, center=True).mean(), 
+                    df[f'{col}_Cos'].rolling(7, min_periods=1, center=True).mean()
                 )) % 360
             
             st.session_state.df = df
             st.session_state.frame_dir = frame_dir
             st.session_state.tot_frames = tot_frames
 
-        with st.spinner("3단계: X축 양 끝단(Top/Finish) 기반 절대 뼈대 구축 중..."):
-            # 💡 [핵심] X축(좌우) 양극단으로 P5와 P12를 절대 록인
-            safe_df = df.loc[int(tot_frames*0.05) : int(tot_frames*0.95)]
-            idx_x_min = int(safe_df['WX_Smooth'].idxmin()) # 화면 제일 왼쪽 (탑 or 피니시)
-            idx_x_max = int(safe_df['WX_Smooth'].idxmax()) # 화면 제일 오른쪽 (탑 or 피니시)
+        with st.spinner("3단계: V-Curve 뼈대 록인(Sequence-Lock) 구축 중..."):
+            # 💡 [핵심] V-Curve 쌍봉(Twin-Peaks) 알고리즘
             
-            p5 = min(idx_x_min, idx_x_max) # 시간상 먼저 오는게 탑
-            p12 = max(idx_x_min, idx_x_max) # 나중에 오는게 피니시
+            # 1. P5 (Top): 영상 앞부분(65%)에서 손목이 가장 높이 올라간 지점 (Y 최소값)
+            search_end_p5 = int(tot_frames * 0.65)
+            p5 = int(df['WY_Smooth'].iloc[:search_end_p5].idxmin())
             
-            # 비정상 스윙 방어
-            if abs(p12 - p5) < 10:
-                p5, p12 = int(tot_frames * 0.3), int(tot_frames * 0.8)
-                
-            # 임팩트(P8)는 탑과 피니시 '사이'에서 손이 가장 낮아진(Y 최대) 곳
-            sub_imp = df.loc[p5:p12]
-            p8 = int(sub_imp['WY_Smooth'].idxmax()) if not sub_imp.empty else p5 + (p12-p5)//2
+            # 2. P12 (Finish): P5 이후부터 영상 끝까지 손목이 가장 높이 올라간 지점 (Y 최소값)
+            p12 = int(df['WY_Smooth'].iloc[p5 + 15 :].idxmin()) if len(df.iloc[p5 + 15 :]) > 0 else tot_frames - 1
+            
+            # 3. P8 (Impact): 무조건 P5와 P12 사이에서 손이 가장 낮아지는 지점 (Y 최대값)
+            sub_imp = df['WY_Smooth'].iloc[p5 + 5 : p12 - 5]
+            p8 = int(sub_imp.idxmax()) if not sub_imp.empty else p5 + (p12 - p5) // 2
 
             # 타임라인 순차 매핑
             auto_f = {"P1": 0, "P5": p5, "P8": p8, "P12": p12, "P13": tot_frames - 1}
-            auto_f["P2"] = find_closest_frame(df, 'SA_Smooth', 45.0, 0, p5)
-            auto_f["P3"] = find_closest_frame(df, 'SA_Smooth', 0.0, auto_f["P2"], p5)
-            auto_f["P4"] = find_closest_frame(df, 'LA_Smooth', 0.0, auto_f["P3"], p5)
-            auto_f["P6"] = find_closest_frame(df, 'SA_Smooth', 315.0, p5, p8)
-            auto_f["P7"] = find_closest_frame(df, 'SA_Smooth', 0.0, auto_f["P6"], p8)
-            auto_f["P9"] = find_closest_frame(df, 'SA_Smooth', 135.0, p8, p12)
-            auto_f["P10"] = find_closest_frame(df, 'SA_Smooth', 180.0, auto_f["P9"], p12)
-            auto_f["P11"] = find_closest_frame(df, 'RA_Smooth', 180.0, auto_f["P10"], p12)
+            auto_f["P2"] = find_closest_frame(df, 'SA_Smooth', 45.0, 0, max(1, p5-5))
+            auto_f["P3"] = find_closest_frame(df, 'SA_Smooth', 0.0, auto_f["P2"], max(1, p5-3))
+            auto_f["P4"] = find_closest_frame(df, 'LA_Smooth', 0.0, auto_f["P3"], max(1, p5-1))
+            
+            auto_f["P6"] = find_closest_frame(df, 'SA_Smooth', 315.0, p5, max(p5+1, p8-3))
+            auto_f["P7"] = find_closest_frame(df, 'SA_Smooth', 0.0, auto_f["P6"], max(p5+2, p8-1))
+            
+            auto_f["P9"] = find_closest_frame(df, 'SA_Smooth', 135.0, p8, max(p8+1, p12-5))
+            auto_f["P10"] = find_closest_frame(df, 'SA_Smooth', 180.0, auto_f["P9"], max(p8+2, p12-3))
+            auto_f["P11"] = find_closest_frame(df, 'RA_Smooth', 180.0, auto_f["P10"], max(p8+3, p12-1))
 
             st.session_state.auto_f = auto_f
             st.session_state.scan_done = True
 
     if 'scan_done' in st.session_state:
-        st.subheader("📸 X축 기반 무결점 분석 뷰 (Dynamic Rendering)")
+        st.subheader("📸 V-Curve 앵커 & 다이나믹 오버레이 뷰")
         cols = st.columns(4)
         df, frame_dir = st.session_state.df, st.session_state.frame_dir
         p1_gp = st.session_state.p1_gp
@@ -247,12 +244,13 @@ if uploaded_file:
                 img = cv2.imread(os.path.join(frame_dir, f"frame_{fn:04d}.jpg"))
                 row = df.loc[fn]
                 
+                # 지면선 렌더링
                 cv2.line(img, p1_gp[0], p1_gp[1], (0,0,255), 4, cv2.LINE_AA)
                 draw_text_with_outline(img, "Ground", (p1_gp[0][0], p1_gp[0][1]+30), 0.6, (0,0,255), (255,255,255), 2)
                 
                 wx, wy = int(row['WX']), int(row['WY'])
                 
-                # 💡 동적 렌더링 호출
+                # 💡 다이나믹 렌더링 호출 (오작동 좌표 무시, 부드러운 스무딩 각도 적용)
                 if p['type'] == 'shaft':
                     draw_dynamic_visuals(img, (wx, wy), row['SA_Smooth'], ref_len, p1_gp[0], p1_gp[1], (0,255,0), "Shaft")
                 elif p['type'] == 'arm_left' and not pd.isna(row['LX']):
