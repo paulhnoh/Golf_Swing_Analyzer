@@ -82,9 +82,11 @@ def create_kalman_2d(init_x, init_y):
     kf.statePost = np.array([[np.float32(init_x)], [np.float32(init_y)], [0], [0]], dtype=np.float32)
     return kf
 
-def detect_club_in_roi(frame, model, pred_x, pred_y, roi_half, wx, wy, conf_th, imgsz):
+def detect_club_in_roi(frame, model, pred_x, pred_y, roi_half, wx, wy, conf_th, imgsz, ref_len=None):
     """예측 위치(pred_x, pred_y) 주변만 잘라서 확대 탐지 -> 작은 헤드/샤프트 인식률 개선.
-    후보는 예측 위치와의 거리로 게이팅해서 배경의 엉뚱한 오탐을 걸러낸다."""
+    후보는 예측 위치와의 거리로 게이팅해서 배경의 엉뚱한 오탐을 걸러낸다.
+    ref_len이 주어지면, 손목(wx,wy)로부터 물리적으로 말이 안 되는 거리(클럽 길이 대비 너무 가깝거나
+    너무 먼)의 후보도 추가로 제외한다 -> 얼굴/배경 등에 락이 걸리는 것을 방지."""
     h, w = frame.shape[:2]
     x0, y0 = max(0, int(pred_x - roi_half)), max(0, int(pred_y - roi_half))
     x1, y1 = min(w, int(pred_x + roi_half)), min(h, int(pred_y + roi_half))
@@ -108,6 +110,10 @@ def detect_club_in_roi(frame, model, pred_x, pred_y, roi_half, wx, wy, conf_th, 
             dist_pred = math.hypot(cx - pred_x, cy - pred_y)
             if dist_pred > roi_half * 1.3:
                 continue
+            if ref_len is not None:
+                dist_wrist = math.hypot(cx - wx, cy - wy)
+                if dist_wrist < ref_len * 0.12 or dist_wrist > ref_len * 1.8:
+                    continue  # 손목 기준 클럽 길이로 봤을 때 물리적으로 말이 안 되는 위치 -> 제외
             if 'head' in cls_name or 'club' in cls_name:
                 head_c.append((cx, cy, conf, dist_pred))
             else:
@@ -307,7 +313,8 @@ if uploaded_file:
 
                                 meas = detect_club_in_roi(frame, custom_model, pred_x, pred_y,
                                                            cur_radius, row['WX'], row['WY'],
-                                                           effective_conf, det_imgsz)
+                                                           effective_conf, det_imgsz,
+                                                           ref_len=st.session_state.ref_club_len)
 
                                 if meas is not None:
                                     mx, my = meas
@@ -616,6 +623,14 @@ if uploaded_file:
                     
                     if p['type'] == 'shaft':
                         draw_dynamic_visuals_with_compass(img, (wx, wy), row['SA_Smooth'], ref_len, p1_gp[0], p1_gp[1], (0,255,0), "Shaft")
+                        # 진단용: 실제로 "클럽"이라고 탐지된 좌표(raw TX,TY)를 점으로 직접 표시.
+                        # 이 점이 진짜 샤프트/헤드 위에 있는지 보면, 각도 오차가 스무딩 때문인지
+                        # 탐지 자체가 틀린 것인지 바로 구분할 수 있다.
+                        if not pd.isna(row.get('TX', np.nan)) and not pd.isna(row.get('TY', np.nan)):
+                            tx_raw, ty_raw = int(row['TX']), int(row['TY'])
+                            cv2.circle(img, (tx_raw, ty_raw), 8, (0, 165, 255), -1, cv2.LINE_AA)
+                            cv2.circle(img, (tx_raw, ty_raw), 8, (0, 0, 0), 2, cv2.LINE_AA)
+                            draw_text_with_outline(img, "Club pt", (tx_raw + 12, ty_raw), 0.5, (0, 165, 255), (0, 0, 0), 2)
                     elif p['type'] == 'arm_left' and not pd.isna(row['LX_Smooth']):
                         draw_dynamic_visuals_with_compass(img, (int(row['LX_Smooth']), int(row['LY_Smooth'])), row['LA_Smooth'], ref_len*0.8, p1_gp[0], p1_gp[1], (0,255,0), "Lt Arm")
                     elif p['type'] == 'arm_right' and not pd.isna(row['RX_Smooth']):
