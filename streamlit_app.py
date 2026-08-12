@@ -385,11 +385,28 @@ if uploaded_file:
                 p8 = p5 + (tot_frames - p5) // 2
                 
             try:
-                # Address(P1): 정지 상태에서 손목이 처음 움직이기 시작하는 시점.
-                # 3px 임계값으로 초기 움직임을 감지 (실측 검증 결과 이 방식이 정확함 - 되돌리지 말 것)
-                wx_start_avg = df['WX_Smooth'].iloc[0:min(5, len(df))].mean()
-                p1_mask = (df['WX_Smooth'].iloc[:p5] - wx_start_avg).abs() > 3.0
-                p1 = int(p1_mask.idxmax()) if p1_mask.any() else 0
+                # Address(P1): 백스윙이 시작되기 전, 샤프트가 지면과 약 90°(±5°)를 유지한 채
+                # "정지"해 있는 구간의 마지막 프레임을 찾는다.
+                # (사용자 정의: Address는 각도 검증이 아니라 "90±5도 근처에서 멈춰있는, 백스윙 시작 직전 프레임")
+                ADDR_ANGLE_TOL = 5.0
+                search_end = max(1, min(p5, tot_frames - 1))
+                wrist_disp_addr = np.hypot(df['WX_Smooth'].diff(), df['WY_Smooth'].diff()).fillna(0.0)
+                sa_near_90 = df['SA_Smooth'].apply(lambda v: (not pd.isna(v)) and angle_diff(v, 90.0) <= ADDR_ANGLE_TOL)
+                is_still = wrist_disp_addr < still_px_th
+                cand_idx = df.index[(df.index < search_end) & sa_near_90 & is_still]
+
+                if len(cand_idx) > 0:
+                    p1 = int(cand_idx.max())  # 정지 구간의 마지막 프레임 = 백스윙이 막 시작되기 직전
+                else:
+                    # 완화 1: 각도 조건은 버리고 "정지 상태"만으로 후보를 찾음 (클럽 탐지가 약한 경우 대비)
+                    cand_idx2 = df.index[(df.index < search_end) & is_still]
+                    if len(cand_idx2) > 0:
+                        p1 = int(cand_idx2.max())
+                    else:
+                        # 최종 폴백: 손목이 처음 움직이기 시작한 시점 (기존 방식)
+                        wx_start_avg = df['WX_Smooth'].iloc[0:min(5, len(df))].mean()
+                        p1_mask = (df['WX_Smooth'].iloc[:p5] - wx_start_avg).abs() > 3.0
+                        p1 = int(p1_mask.idxmax()) if p1_mask.any() else 0
             except:
                 p1 = 0
 
@@ -425,7 +442,7 @@ if uploaded_file:
             BASE_P2, BASE_P3 = 45.0, 0.0          # P2 샤프트45도, P3 샤프트0도
             BASE_P4 = 0.0                          # P4 리드암(왼팔) 수평
             BASE_P6, BASE_P7 = 315.0, 0.0          # P6 샤프트315도, P7 샤프트0도
-            BASE_P9, BASE_P10 = 135.0, 0.0         # P9 샤프트135도, P10 샤프트0도
+            BASE_P9, BASE_P10 = 135.0, 180.0       # P9 샤프트135도, P10 샤프트180도 (사용자 확인 완료)
             BASE_P11 = 0.0                         # P11 리드암 반대팔(오른팔) 수평
 
             if is_left_handed:
@@ -451,7 +468,7 @@ if uploaded_file:
                 {"phase": "P7", "name": "DB Alignment (샤프트 0°)", "target": tgt_p7, "type": "shaft"},
                 {"phase": "P8", "name": "Impact (손목/헤드 최저점)", "target": None, "type": "impact"},
                 {"phase": "P9", "name": "Release (샤프트 135°)", "target": tgt_p9, "type": "shaft"},
-                {"phase": "P10", "name": "DF Alignment (샤프트 0°)", "target": tgt_p10, "type": "shaft"},
+                {"phase": "P10", "name": "DF Alignment (샤프트 180°)", "target": tgt_p10, "type": "shaft"},
                 {"phase": "P11", "name": "Trail Arm Parallel (반대팔 수평)", "target": tgt_p11_ang, "type": "arm_right" if not is_left_handed else "arm_left"},
                 {"phase": "P12", "name": "Follow-Through Top (반대손 최고점)", "target": None, "type": "top"},
                 {"phase": "P13", "name": "Finish (동작 정지)", "target": None, "type": "finish"},
@@ -470,6 +487,27 @@ if uploaded_file:
             auto_f["P9"], auto_f_estimated["P9"] = find_closest_frame(df, 'SA_Smooth', tgt_p9, p8, p12)
             auto_f["P10"], auto_f_estimated["P10"] = find_closest_frame(df, 'SA_Smooth', tgt_p10, auto_f["P9"], p12)
             auto_f["P11"], auto_f_estimated["P11"] = find_closest_frame(df, tgt_p11_arm, tgt_p11_ang, auto_f["P10"], p12)
+
+            # --- 실측 스냅(snap) ---
+            # 클럽 각도 기반(shaft/arm) phase가 하필 칼만 "예측" 프레임에 걸리면, 그 프레임은
+            # 실제 탐지가 아니라 추정된 위치라 시각적으로 실제 사진과 어긋나 보일 수 있다.
+            # 주변 ±4프레임 안에 실측(T_Predicted=False) 프레임이 있으면 그쪽으로 옮겨서
+            # 화면에 보이는 각도가 항상 "실제로 탐지된" 값을 우선하도록 한다.
+            SNAP_WINDOW = 4
+            angle_based_phases = {p['phase'] for p in phases_info if p['type'] in ('shaft', 'arm_left', 'arm_right')}
+            if 'T_Predicted' in df.columns:
+                for ph in list(auto_f.keys()):
+                    if ph not in angle_based_phases:
+                        continue
+                    f0 = auto_f[ph]
+                    if f0 not in df.index or not bool(df.loc[f0, 'T_Predicted']):
+                        continue  # 이미 실측이면 그대로 둠
+                    lo, hi = max(0, f0 - SNAP_WINDOW), min(tot_frames - 1, f0 + SNAP_WINDOW)
+                    window = df.loc[lo:hi]
+                    real_hits = window[window['T_Predicted'] == False]
+                    if not real_hits.empty:
+                        nearest = (real_hits.index.to_series() - f0).abs().idxmin()
+                        auto_f[ph] = int(nearest)
 
             st.session_state.auto_f_estimated = auto_f_estimated
 
