@@ -373,13 +373,25 @@ if uploaded_file:
             for col in SMOOTH_COLS:
                 df[col] = df[col].rolling(window=3, min_periods=1, center=True).median()
 
-            for col in SMOOTH_COLS:
+            # 빠르게 움직이는 포인트(손목/클럽)는 5프레임 평균을 쓰면 실제 위치보다 뒤처져 보이는
+            # "지연(lag)" 현상이 생긴다 (정지 상태인 어드레스는 문제 없지만, 테이크어웨이/전환구간처럼
+            # 빠르게 움직이는 구간에서 그려진 선이 실제 사진 속 샤프트와 어긋나 보이는 원인).
+            # 상대적으로 느리게 움직이는 어깨(LX,LY/RX,RY)는 창을 크게(5) 유지해 노이즈를 더 줄이고,
+            # 빠른 지점(손목/클럽)은 창을 작게(3) 줄여 지연을 최소화한다.
+            FAST_COLS = ['WX', 'WY', 'TX', 'TY', 'RWX', 'RWY', 'LWX', 'LWY']
+            SLOW_COLS = ['LX', 'LY', 'RX', 'RY']
+            for col in FAST_COLS:
+                df[f'{col}_Smooth'] = df[col].rolling(window=3, min_periods=1, center=True).mean()
+            for col in SLOW_COLS:
                 df[f'{col}_Smooth'] = df[col].rolling(window=5, min_periods=1, center=True).mean()
 
             for i in df.index:
                 df.loc[i, 'SA_Smooth'] = get_blueprint_angle(df.loc[i, 'WX_Smooth'], df.loc[i, 'WY_Smooth'], df.loc[i, 'TX_Smooth'], df.loc[i, 'TY_Smooth'], p1_gp[0], p1_gp[1])
                 df.loc[i, 'LA_Smooth'] = get_blueprint_angle(df.loc[i, 'LX_Smooth'], df.loc[i, 'LY_Smooth'], df.loc[i, 'WX_Smooth'], df.loc[i, 'WY_Smooth'], p1_gp[0], p1_gp[1])
                 df.loc[i, 'RA_Smooth'] = get_blueprint_angle(df.loc[i, 'RX_Smooth'], df.loc[i, 'RY_Smooth'], df.loc[i, 'WX_Smooth'], df.loc[i, 'WY_Smooth'], p1_gp[0], p1_gp[1])
+                # 스무딩을 거치지 않은(median 필터까지만 적용된) "순간" 각도도 같이 계산해둔다.
+                # 스무딩값과 크게 차이나면 "지연" 문제, 순간값 자체도 부정확하면 "탐지" 문제로 구분 가능.
+                df.loc[i, 'SA_Instant'] = get_blueprint_angle(df.loc[i, 'WX'], df.loc[i, 'WY'], df.loc[i, 'TX'], df.loc[i, 'TY'], p1_gp[0], p1_gp[1])
 
         with st.spinner("3단계: 시퀀스 타임라인 매칭 중..."):
             # ⚠️ 현재 버전은 단순화를 위해 "오른손 선수 전용"입니다 (좌타 판별 로직 제거).
@@ -623,4 +635,8 @@ if uploaded_file:
                 if st.session_state.get('auto_f_estimated', {}).get(p['phase'], False):
                     est_tag = " · ⚠️추정값(클럽 데이터 부족)"
 
-                st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption=f"[{p['phase']}] {p['name']} ({status}){pred_tag}{est_tag}", use_column_width=True)
+                debug_tag = ""
+                if row is not None and p['type'] == 'shaft' and not pd.isna(row.get('SA_Instant', np.nan)):
+                    debug_tag = f" · [스무딩 {row['SA_Smooth']:.1f}° / 순간 {row['SA_Instant']:.1f}°]"
+
+                st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption=f"[{p['phase']}] {p['name']} ({status}){pred_tag}{est_tag}{debug_tag}", use_column_width=True)
