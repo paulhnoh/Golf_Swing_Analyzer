@@ -123,11 +123,21 @@ def detect_club_in_roi(frame, model, pred_x, pred_y, roi_half, wx, wy, conf_th, 
 
 def find_closest_frame(df, col, target, start_f, end_f, fail_diff_threshold=60.0):
     """구간 [start_f, end_f] 안에서 target 각도와 가장 가까운 프레임을 찾는다.
-    반환: (frame, is_estimated) - is_estimated=True면 구간 데이터가 거의 없어(대부분 NaN)
-    신뢰할 수 없는 매칭이라, 동일 경계 프레임으로 뭉치는 대신 구간 중간 지점으로 대체했다는 뜻.
+    반환: (frame, is_estimated) - is_estimated=True면 신뢰할 수 없는 매칭이라는 뜻.
     """
     if start_f >= end_f or col not in df.columns:
-        return start_f, True
+        # 체이닝(이전 phase 프레임을 다음 phase 검색 시작점으로 사용)으로 인해 검색 구간이
+        # 아예 사라진 경우 -> 그 경계값을 그대로 반환하지 않고, 주변 소구간(±3프레임)에서
+        # 대신 검색해 최소한의 매칭 기회를 준다 (여러 phase가 강제로 동일 프레임에 뭉치는 것을 방지)
+        lo, hi = max(0, start_f - 3), start_f + 3
+        if col not in df.columns:
+            return start_f, True
+        sub = df[(df['Frame'] >= lo) & (df['Frame'] <= hi)].copy()
+        if sub.empty:
+            return start_f, True
+        sub['diff'] = sub[col].apply(lambda x: angle_diff(x, target) if not pd.isna(x) else 999)
+        return int(sub['diff'].idxmin()), True
+
     sub = df[(df['Frame'] >= start_f) & (df['Frame'] <= end_f)].copy()
     if sub.empty:
         return start_f, True
@@ -247,7 +257,8 @@ if uploaded_file:
                 cv2.imwrite(os.path.join(frame_dir, f"frame_{fn:04d}.jpg"), frame)
 
                 row = {'Frame': fn, 'WX': np.nan, 'WY': np.nan, 'TX': np.nan, 'TY': np.nan,
-                       'LX': np.nan, 'LY': np.nan, 'RX': np.nan, 'RY': np.nan, 'T_Predicted': False}
+                       'LX': np.nan, 'LY': np.nan, 'RX': np.nan, 'RY': np.nan,
+                       'RWX': np.nan, 'RWY': np.nan, 'LWX': np.nan, 'LWY': np.nan, 'T_Predicted': False}
                 det_status = 'no_wrist'
 
                 try:
@@ -260,6 +271,12 @@ if uploaded_file:
                         if len(kp) > 10:
                             if kp[5][0] > 0: row['LX'], row['LY'] = float(kp[5][0]), float(kp[5][1])
                             if kp[6][0] > 0: row['RX'], row['RY'] = float(kp[6][0]), float(kp[6][1])
+                            # 왼쪽/오른쪽 손목(kp[9]/kp[10])을 각각 별도로도 저장
+                            # -> P5(왼손 최고점) / P8·P12(오른손 기준) 정의를 손별로 정확히 판정하기 위함
+                            if kp[9][0] > 0 and cf[9] > 0.05:
+                                row['LWX'], row['LWY'] = float(kp[9][0]), float(kp[9][1])
+                            if kp[10][0] > 0 and cf[10] > 0.05:
+                                row['RWX'], row['RWY'] = float(kp[10][0]), float(kp[10][1])
                             pts = [kp[i] for i in (9, 10) if kp[i][0] > 0 and cf[i] > 0.05]
 
                             if pts:
@@ -346,16 +363,17 @@ if uploaded_file:
         with st.spinner("2단계: 데이터 정제 및 안정화 처리 중..."):
             df = pd.DataFrame(db_data)
             
-            for col in ['WX', 'WY', 'LX', 'LY', 'RX', 'RY', 'TX', 'TY']:
+            SMOOTH_COLS = ['WX', 'WY', 'LX', 'LY', 'RX', 'RY', 'TX', 'TY', 'RWX', 'RWY', 'LWX', 'LWY']
+            for col in SMOOTH_COLS:
                 if col not in df.columns: df[col] = np.nan
 
-            df[['WX', 'WY', 'LX', 'LY', 'RX', 'RY', 'TX', 'TY']] = df[['WX', 'WY', 'LX', 'LY', 'RX', 'RY', 'TX', 'TY']].interpolate(limit_direction='both')
+            df[SMOOTH_COLS] = df[SMOOTH_COLS].interpolate(limit_direction='both')
 
             # 순간적으로 튀는 오탐(스파이크)을 중앙값 필터로 먼저 제거한 뒤 평균으로 부드럽게 처리
-            for col in ['WX', 'WY', 'LX', 'LY', 'RX', 'RY', 'TX', 'TY']:
+            for col in SMOOTH_COLS:
                 df[col] = df[col].rolling(window=3, min_periods=1, center=True).median()
 
-            for col in ['WX', 'WY', 'LX', 'LY', 'RX', 'RY', 'TX', 'TY']:
+            for col in SMOOTH_COLS:
                 df[f'{col}_Smooth'] = df[col].rolling(window=5, min_periods=1, center=True).mean()
 
             for i in df.index:
@@ -363,27 +381,14 @@ if uploaded_file:
                 df.loc[i, 'LA_Smooth'] = get_blueprint_angle(df.loc[i, 'LX_Smooth'], df.loc[i, 'LY_Smooth'], df.loc[i, 'WX_Smooth'], df.loc[i, 'WY_Smooth'], p1_gp[0], p1_gp[1])
                 df.loc[i, 'RA_Smooth'] = get_blueprint_angle(df.loc[i, 'RX_Smooth'], df.loc[i, 'RY_Smooth'], df.loc[i, 'WX_Smooth'], df.loc[i, 'WY_Smooth'], p1_gp[0], p1_gp[1])
 
-        with st.spinner("3단계: 시퀀스 타임라인 및 좌/우타 매칭 중..."):
+        with st.spinner("3단계: 시퀀스 타임라인 매칭 중..."):
+            # ⚠️ 현재 버전은 단순화를 위해 "오른손 선수 전용"입니다 (좌타 판별 로직 제거).
+            # P5(백스윙 탑)=왼손목 최고점, P12(팔로우스루 탑)=오른손목 최고점을 직접 사용합니다.
             try:
-                p5 = int(df['WY_Smooth'].iloc[:int(tot_frames * 0.65)].idxmin())
+                p5 = int(df['LWY_Smooth'].iloc[:int(tot_frames * 0.65)].idxmin())
             except:
                 p5 = int(tot_frames * 0.3)
-                
-            try:
-                p12 = int(df['WY_Smooth'].iloc[p5 + 15 :].idxmin()) if len(df.iloc[p5 + 15 :]) > 0 else tot_frames - 1
-            except:
-                p12 = tot_frames - 1
 
-            # P8(임팩트): "손목 혹은 헤드 최저점" -> 두 신호 중 더 낮은(화면상 Y가 큰) 쪽을 프레임별로 취해
-            # 그 결합 신호가 최대가 되는 지점을 찾는다. 클럽 헤드가 손목보다 늦게 최저점에 도달하는
-            # 릴리즈/래그 특성을 반영해 손목만 볼 때보다 실제 임팩트에 더 가깝게 잡힌다.
-            try:
-                low_point_signal = df[['WY_Smooth', 'TY_Smooth']].max(axis=1)
-                sub_imp = low_point_signal.iloc[p5 + 5 : p12 - 5]
-                p8 = int(sub_imp.idxmax()) if not sub_imp.empty else p5 + (p12 - p5) // 2
-            except:
-                p8 = p5 + (tot_frames - p5) // 2
-                
             try:
                 # Address(P1): 백스윙이 시작되기 전, 샤프트가 지면과 약 90°(±5°)를 유지한 채
                 # "정지"해 있는 구간의 마지막 프레임을 찾는다.
@@ -410,10 +415,23 @@ if uploaded_file:
             except:
                 p1 = 0
 
+            is_left_handed = False  # 단순화: 오른손 선수 전용 (향후 좌타 지원 시 이 값만 판별 로직으로 교체)
+
             try:
-                is_left_handed = df['WX_Smooth'].iloc[p5] < df['WX_Smooth'].iloc[p1]
+                p12 = int(df['RWY_Smooth'].iloc[p5 + 15 :].idxmin()) if len(df.iloc[p5 + 15 :]) > 0 else tot_frames - 1
             except:
-                is_left_handed = False
+                p12 = tot_frames - 1
+
+            # P8(임팩트): 레퍼런스 정의 = "클럽헤드 혹은 오른손의 최저점" -> 오른쪽 손목(RWY_Smooth) 전용
+            # 신호와 클럽헤드(TY_Smooth) 신호 중 더 낮은(화면상 Y가 큰) 쪽을 프레임별로 취해
+            # 그 결합 신호가 최대가 되는 지점을 찾는다. 클럽 헤드가 손목보다 늦게 최저점에 도달하는
+            # 릴리즈/래그 특성을 반영해 손목만 볼 때보다 실제 임팩트에 더 가깝게 잡힌다.
+            try:
+                low_point_signal = df[['RWY_Smooth', 'TY_Smooth']].max(axis=1)
+                sub_imp = low_point_signal.iloc[p5 + 5 : p12 - 5]
+                p8 = int(sub_imp.idxmax()) if not sub_imp.empty else p5 + (p12 - p5) // 2
+            except:
+                p8 = p5 + (tot_frames - p5) // 2
 
             # P13(피니시 정지): 전체 스윙이 끝나고 손목+클럽의 움직임이 2~3프레임 이상
             # 거의 없어지는 첫 시점을 찾는다. 못 찾으면 마지막 프레임으로 대체.
