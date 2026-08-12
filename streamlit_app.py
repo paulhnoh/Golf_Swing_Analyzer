@@ -44,6 +44,14 @@ with st.sidebar:
                                       "클럽일 수 없다고 보고 제외합니다. 너무 낮추면(예: 1.15) 팔로우스루처럼 "
                                       "원근 효과로 2D상 거리가 어드레스보다 더 길게 보이는 구간의 진짜 탐지까지 "
                                       "걸러져 오히려 실측 탐지율이 떨어질 수 있습니다 (실측 검증 완료).")
+    detect_method = st.selectbox(
+        "클럽 방향 탐지 방식",
+        ["YOLO 우선, Hough 보조", "Hough 우선, YOLO 보조", "YOLO만 사용", "Hough 직선검출만 사용"],
+        index=0,
+        help="YOLO(커스텀 학습 모델)는 클래스 오분류로 방향이 완전히 엉뚱하게 나올 수 있습니다. "
+             "Hough는 학습 없이 손목 근처에서 시작하는 직선 에지를 직접 찾아 방향을 추정하는 "
+             "고전적 이미지처리 방식이라, 오분류 위험은 없지만 배경이 복잡하면 선을 못 찾을 수 있습니다. "
+             "두 방식을 비교해보고 이 영상에 더 잘 맞는 쪽을 고르세요.")
     st.divider()
     st.header("🏁 P13(정지) 판정")
     still_px_th = st.slider("정지 판정 임계값(px/frame)", 0.5, 8.0, 2.0, 0.5,
@@ -151,6 +159,51 @@ def detect_club_in_roi(frame, model, pred_x, pred_y, roi_half, wx, wy, conf_th, 
         best = max(shaft_c, key=lambda x: x[2] - 0.35 * (x[3] / max(roi_half, 1)))
         return (best[0], best[1]), rejected_by_distance
     return None, rejected_by_distance
+
+def detect_shaft_hough(frame, wx, wy, roi_half, ref_len=None, upper_mult=1.6):
+    """학습된 클래스 분류에 의존하지 않고, 손목 근처에서 시작하는 직선(에지)을 Hough 변환으로
+    직접 찾아 샤프트 방향을 추정한다. 골프 샤프트는 잔디/하늘을 배경으로 뚜렷한 직선 경계를
+    만들기 때문에, YOLO가 엉뚱한 클래스로 오분류하는 문제 자체를 우회할 수 있다.
+    - 손목 근처(허용오차 이내)에서 시작하는 선분만 후보로 인정 (그립 쪽 끝점)
+    - 반대쪽(먼) 끝점까지의 거리가 물리적으로 말이 되는 범위(ref_len 기준)인 것만 채택
+    - 여러 후보 중 가장 긴 선분을 채택 (짧은 선분은 잡음일 가능성이 높음)
+    반환값: (fx, fy) 먼 쪽 끝점 좌표(=클럽 방향을 나타내는 점) 또는 None."""
+    h, w = frame.shape[:2]
+    x0, y0 = max(0, int(wx - roi_half)), max(0, int(wy - roi_half))
+    x1, y1 = min(w, int(wx + roi_half)), min(h, int(wy + roi_half))
+    if x1 - x0 < 20 or y1 - y0 < 20:
+        return None
+
+    crop = frame[y0:y1, x0:x1]
+    try:
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 50, 150)
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=25,
+                                 minLineLength=max(15, int(roi_half * 0.25)), maxLineGap=8)
+    except Exception:
+        return None
+    if lines is None:
+        return None
+
+    wx_local, wy_local = wx - x0, wy - y0
+    near_tol = max(15, roi_half * 0.18)
+    best_far, best_len = None, -1.0
+
+    for line in lines:
+        lx1, ly1, lx2, ly2 = line[0]
+        d1 = math.hypot(lx1 - wx_local, ly1 - wy_local)
+        d2 = math.hypot(lx2 - wx_local, ly2 - wy_local)
+        near_d, far_pt, far_d = (d1, (lx2, ly2), d2) if d1 <= d2 else (d2, (lx1, ly1), d1)
+        if near_d > near_tol:
+            continue  # 손목 근처에서 시작하지 않는 선분 -> 그립/샤프트가 아닐 가능성이 큼
+        if ref_len is not None and (far_d < ref_len * 0.10 or far_d > ref_len * upper_mult):
+            continue  # 물리적으로 말이 안 되는 길이 -> 제외
+        seg_len = math.hypot(lx2 - lx1, ly2 - ly1)
+        if seg_len > best_len:
+            best_len = seg_len
+            best_far = (far_pt[0] + x0, far_pt[1] + y0)
+
+    return best_far
 
 def find_closest_frame(df, col, target, start_f, end_f, fail_diff_threshold=60.0):
     """구간 [start_f, end_f] 안에서 target 각도와 가장 가까운 프레임을 찾는다.
@@ -314,7 +367,7 @@ if uploaded_file:
                        'RWX': np.nan, 'RWY': np.nan, 'LWX': np.nan, 'LWY': np.nan, 'T_Predicted': False}
                 det_status = 'no_wrist'
                 n_rejected_dist = 0
-
+                meas = yolo_meas = hough_meas = None
                 try:
                     p_res = pose_model(frame, verbose=False)[0]
 
@@ -359,12 +412,32 @@ if uploaded_file:
                                 # (오탐이 섞여도 다음 프레임부터 칼만 거리 게이팅으로 곧 걸러짐)
                                 effective_conf = max(0.05, conf_th * 0.6) if reacquiring else conf_th
 
-                                meas, n_rejected_dist = detect_club_in_roi(frame, custom_model, pred_x, pred_y,
-                                                           cur_radius, row['WX'], row['WY'],
-                                                           effective_conf, det_imgsz,
-                                                           ref_len=st.session_state.ref_club_len,
-                                                           use_head=use_head_detection,
-                                                           dist_upper_mult=dist_upper_mult)
+                                yolo_meas, n_rejected_dist = (None, 0)
+                                hough_meas = None
+                                ref_len_val = st.session_state.ref_club_len
+
+                                if detect_method in ("YOLO 우선, Hough 보조", "YOLO만 사용"):
+                                    yolo_meas, n_rejected_dist = detect_club_in_roi(
+                                        frame, custom_model, pred_x, pred_y, cur_radius,
+                                        row['WX'], row['WY'], effective_conf, det_imgsz,
+                                        ref_len=ref_len_val, use_head=use_head_detection,
+                                        dist_upper_mult=dist_upper_mult)
+                                    if yolo_meas is None and detect_method == "YOLO 우선, Hough 보조":
+                                        hough_meas = detect_shaft_hough(frame, row['WX'], row['WY'],
+                                                                         cur_radius, ref_len=ref_len_val,
+                                                                         upper_mult=dist_upper_mult)
+                                elif detect_method in ("Hough 우선, YOLO 보조", "Hough 직선검출만 사용"):
+                                    hough_meas = detect_shaft_hough(frame, row['WX'], row['WY'],
+                                                                     cur_radius, ref_len=ref_len_val,
+                                                                     upper_mult=dist_upper_mult)
+                                    if hough_meas is None and detect_method == "Hough 우선, YOLO 보조":
+                                        yolo_meas, n_rejected_dist = detect_club_in_roi(
+                                            frame, custom_model, pred_x, pred_y, cur_radius,
+                                            row['WX'], row['WY'], effective_conf, det_imgsz,
+                                            ref_len=ref_len_val, use_head=use_head_detection,
+                                            dist_upper_mult=dist_upper_mult)
+
+                                meas = yolo_meas if yolo_meas is not None else hough_meas
 
                                 if meas is not None:
                                     mx, my = meas
@@ -411,7 +484,9 @@ if uploaded_file:
                 except Exception:
                     pass
 
-                debug_detect_log.append({'Frame': fn, 'status': det_status, 'rejected_by_distance': n_rejected_dist})
+                debug_detect_log.append({'Frame': fn, 'status': det_status, 'rejected_by_distance': n_rejected_dist,
+                                          'source': ('yolo' if meas is not None and meas is yolo_meas
+                                                     else ('hough' if meas is not None else 'none'))})
 
                 db_data.append(row)
             cap.release()
@@ -632,6 +707,12 @@ if uploaded_file:
                                f"이 거리(×{dist_upper_mult:.2f})를 넘는 후보는 물리적으로 클럽일 수 없다고 보고 자동 제외됩니다.")
                     st.caption(f"🚫 물리적 거리 기준으로 제외된 오탐 후보: 총 {total_rejected}개 "
                                f"({frames_with_rejection}개 프레임에서 발생)")
+
+                if 'source' in dbg.columns:
+                    n_yolo = int((dbg['source'] == 'yolo').sum())
+                    n_hough = int((dbg['source'] == 'hough').sum())
+                    st.caption(f"🔎 탐지 방식별 실측 성공 프레임: YOLO {n_yolo}개 / Hough 직선검출 {n_hough}개 "
+                               f"(현재 설정: {detect_method})")
 
                 # 연속 미탐지(lost/pending) 구간을 찾아 프레임 범위로 보여줌 -> 실측값과 대조하기 쉬움
                 lost_mask = dbg['status'].isin(['lost', 'pending']).to_numpy()
