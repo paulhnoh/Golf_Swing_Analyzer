@@ -121,12 +121,24 @@ def detect_club_in_roi(frame, model, pred_x, pred_y, roi_half, wx, wy, conf_th, 
         return best[0], best[1]
     return None
 
-def find_closest_frame(df, col, target, start_f, end_f):
-    if start_f >= end_f or col not in df.columns: return start_f
+def find_closest_frame(df, col, target, start_f, end_f, fail_diff_threshold=60.0):
+    """구간 [start_f, end_f] 안에서 target 각도와 가장 가까운 프레임을 찾는다.
+    반환: (frame, is_estimated) - is_estimated=True면 구간 데이터가 거의 없어(대부분 NaN)
+    신뢰할 수 없는 매칭이라, 동일 경계 프레임으로 뭉치는 대신 구간 중간 지점으로 대체했다는 뜻.
+    """
+    if start_f >= end_f or col not in df.columns:
+        return start_f, True
     sub = df[(df['Frame'] >= start_f) & (df['Frame'] <= end_f)].copy()
-    if sub.empty: return start_f
+    if sub.empty:
+        return start_f, True
     sub['diff'] = sub[col].apply(lambda x: angle_diff(x, target) if not pd.isna(x) else 999)
-    return int(sub['diff'].idxmin())
+    best_idx = int(sub['diff'].idxmin())
+    best_diff = float(sub['diff'].min())
+    if best_diff > fail_diff_threshold:
+        # 클럽 데이터가 부족해 신뢰할 수 없는 매칭 -> 여러 phase가 같은 경계 프레임으로
+        # 뭉치는 것을 막기 위해 구간 중간 지점으로 대체 (실제 값이 아닌 추정값임을 표시)
+        return int(round((start_f + end_f) / 2)), True
+    return best_idx, False
 
 def draw_text_with_outline(img, text, pos, font_scale, text_color, outline_color, thickness):
     x, y = pos
@@ -446,16 +458,20 @@ if uploaded_file:
             ]
 
             auto_f = {"P1": p1, "P5": p5, "P8": p8, "P12": p12, "P13": p13}
-            auto_f["P2"] = find_closest_frame(df, 'SA_Smooth', tgt_p2, p1, p5)
-            auto_f["P3"] = find_closest_frame(df, 'SA_Smooth', tgt_p3, auto_f["P2"], p5)
-            auto_f["P4"] = find_closest_frame(df, tgt_p4_arm, tgt_p4_ang, auto_f["P3"], p5)
-            
-            auto_f["P6"] = find_closest_frame(df, 'SA_Smooth', tgt_p6, p5, p8)
-            auto_f["P7"] = find_closest_frame(df, 'SA_Smooth', tgt_p7, auto_f["P6"], p8)
-            
-            auto_f["P9"] = find_closest_frame(df, 'SA_Smooth', tgt_p9, p8, p12)
-            auto_f["P10"] = find_closest_frame(df, 'SA_Smooth', tgt_p10, auto_f["P9"], p12)
-            auto_f["P11"] = find_closest_frame(df, tgt_p11_arm, tgt_p11_ang, auto_f["P10"], p12)
+            auto_f_estimated = {k: False for k in auto_f}  # 각 phase가 실제 데이터 매칭인지, 데이터 부족으로 인한 추정값인지
+
+            auto_f["P2"], auto_f_estimated["P2"] = find_closest_frame(df, 'SA_Smooth', tgt_p2, p1, p5)
+            auto_f["P3"], auto_f_estimated["P3"] = find_closest_frame(df, 'SA_Smooth', tgt_p3, auto_f["P2"], p5)
+            auto_f["P4"], auto_f_estimated["P4"] = find_closest_frame(df, tgt_p4_arm, tgt_p4_ang, auto_f["P3"], p5)
+
+            auto_f["P6"], auto_f_estimated["P6"] = find_closest_frame(df, 'SA_Smooth', tgt_p6, p5, p8)
+            auto_f["P7"], auto_f_estimated["P7"] = find_closest_frame(df, 'SA_Smooth', tgt_p7, auto_f["P6"], p8)
+
+            auto_f["P9"], auto_f_estimated["P9"] = find_closest_frame(df, 'SA_Smooth', tgt_p9, p8, p12)
+            auto_f["P10"], auto_f_estimated["P10"] = find_closest_frame(df, 'SA_Smooth', tgt_p10, auto_f["P9"], p12)
+            auto_f["P11"], auto_f_estimated["P11"] = find_closest_frame(df, tgt_p11_arm, tgt_p11_ang, auto_f["P10"], p12)
+
+            st.session_state.auto_f_estimated = auto_f_estimated
 
             st.session_state.df = df
             st.session_state.frame_dir = frame_dir
@@ -496,6 +512,13 @@ if uploaded_file:
                     st.write(", ".join([f"{a}~{b}프레임" for a, b in ranges]))
                 else:
                     st.caption("연속 미탐지 구간 없음 — 전체적으로 안정적으로 추적됨.")
+
+            with st.expander("📈 각도 변화 그래프 (샤프트/팔 각도가 프레임별로 어떻게 움직였는지 확인)"):
+                st.caption("여러 phase가 같은 프레임으로 뭉쳐 나올 때, 실제로 그 구간에서 각도가 얼마나 빠르게 "
+                           "변했는지 눈으로 확인할 수 있습니다. 급격한 수직에 가까운 구간이면 촬영 프레임 사이로 "
+                           "목표각도가 스쳐 지나갔을 가능성이 큽니다.")
+                chart_df = st.session_state.df.set_index('Frame')[['SA_Smooth', 'LA_Smooth', 'RA_Smooth']]
+                st.line_chart(chart_df)
 
         st.subheader("📸 청사진(Compass) 좌/우타 동기화 뷰")
         cols = st.columns(4)
@@ -540,4 +563,8 @@ if uploaded_file:
                 if row is not None and bool(row.get('T_Predicted', False)):
                     pred_tag = " · 클럽 예측값(칼만)"
 
-                st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption=f"[{p['phase']}] {p['name']} ({status}){pred_tag}", use_column_width=True)
+                est_tag = ""
+                if st.session_state.get('auto_f_estimated', {}).get(p['phase'], False):
+                    est_tag = " · ⚠️추정값(클럽 데이터 부족)"
+
+                st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption=f"[{p['phase']}] {p['name']} ({status}){pred_tag}{est_tag}", use_column_width=True)
