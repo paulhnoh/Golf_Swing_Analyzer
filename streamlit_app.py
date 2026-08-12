@@ -35,6 +35,10 @@ with st.sidebar:
                                      help="칼만 예측 위치를 중심으로 이 반경 안에서만 클럽을 찾습니다. 너무 좁으면 빠른 스윙 구간에서 놓칩니다.")
     det_imgsz = st.select_slider("ROI 탐지 해상도(imgsz)", options=[320, 480, 640, 800, 960], value=640,
                                   help="크롭된 영역을 이 크기로 확대해서 탐지합니다. 작은 헤드/샤프트일수록 높이는 게 유리합니다.")
+    use_head_detection = st.checkbox("클럽 헤드 탐지도 사용", value=False,
+                                      help="꺼두면(기본값) 헤드 탐지는 무시하고 샤프트 탐지만 사용합니다. "
+                                           "실측 결과 헤드가 배경/손 등으로 오탐되는 경우가 샤프트보다 훨씬 잦아서, "
+                                           "기본은 꺼둔 상태를 권장합니다.")
     st.divider()
     st.header("🏁 P13(정지) 판정")
     still_px_th = st.slider("정지 판정 임계값(px/frame)", 0.5, 8.0, 2.0, 0.5,
@@ -82,11 +86,13 @@ def create_kalman_2d(init_x, init_y):
     kf.statePost = np.array([[np.float32(init_x)], [np.float32(init_y)], [0], [0]], dtype=np.float32)
     return kf
 
-def detect_club_in_roi(frame, model, pred_x, pred_y, roi_half, wx, wy, conf_th, imgsz, ref_len=None):
+def detect_club_in_roi(frame, model, pred_x, pred_y, roi_half, wx, wy, conf_th, imgsz, ref_len=None, use_head=False):
     """예측 위치(pred_x, pred_y) 주변만 잘라서 확대 탐지 -> 작은 헤드/샤프트 인식률 개선.
     후보는 예측 위치와의 거리로 게이팅해서 배경의 엉뚱한 오탐을 걸러낸다.
     ref_len이 주어지면, 손목(wx,wy)로부터 물리적으로 말이 안 되는 거리(클럽 길이 대비 너무 가깝거나
-    너무 먼)의 후보도 추가로 제외한다 -> 얼굴/배경 등에 락이 걸리는 것을 방지."""
+    너무 먼)의 후보도 추가로 제외한다 -> 얼굴/배경 등에 락이 걸리는 것을 방지.
+    use_head=False(기본값)이면 헤드 클래스 탐지는 아예 후보에서 제외하고 샤프트만 사용한다
+    -> 실측 결과 헤드 오탐이 샤프트보다 훨씬 잦았기 때문에, 오탐이 적은 샤프트만 신뢰한다."""
     h, w = frame.shape[:2]
     x0, y0 = max(0, int(pred_x - roi_half)), max(0, int(pred_y - roi_half))
     x1, y1 = min(w, int(pred_x + roi_half)), min(h, int(pred_y + roi_half))
@@ -114,16 +120,21 @@ def detect_club_in_roi(frame, model, pred_x, pred_y, roi_half, wx, wy, conf_th, 
                 dist_wrist = math.hypot(cx - wx, cy - wy)
                 if dist_wrist < ref_len * 0.12 or dist_wrist > ref_len * 1.8:
                     continue  # 손목 기준 클럽 길이로 봤을 때 물리적으로 말이 안 되는 위치 -> 제외
-            if 'head' in cls_name or 'club' in cls_name:
-                head_c.append((cx, cy, conf, dist_pred))
+            is_head = 'head' in cls_name or 'club' in cls_name
+            if is_head:
+                if use_head:
+                    head_c.append((cx, cy, conf, dist_pred))
+                # use_head=False면 헤드 탐지는 통째로 무시 (샤프트만 신뢰)
             else:
                 shaft_c.append((cx, cy, conf, dist_pred))
 
-    if head_c:
-        best = max(head_c, key=lambda x: x[2] - 0.15 * (x[3] / max(roi_half, 1)))
-        return best[0], best[1]
+    # 샤프트를 우선한다 (실측 검증 결과 헤드보다 오탐이 훨씬 적음). 헤드는 use_head=True일 때만,
+    # 그리고 샤프트가 하나도 없을 때만 보조적으로 사용한다.
     if shaft_c:
         best = max(shaft_c, key=lambda x: x[2] - 0.35 * (x[3] / max(roi_half, 1)))
+        return best[0], best[1]
+    if head_c:
+        best = max(head_c, key=lambda x: x[2] - 0.15 * (x[3] / max(roi_half, 1)))
         return best[0], best[1]
     return None
 
@@ -314,7 +325,8 @@ if uploaded_file:
                                 meas = detect_club_in_roi(frame, custom_model, pred_x, pred_y,
                                                            cur_radius, row['WX'], row['WY'],
                                                            effective_conf, det_imgsz,
-                                                           ref_len=st.session_state.ref_club_len)
+                                                           ref_len=st.session_state.ref_club_len,
+                                                           use_head=use_head_detection)
 
                                 if meas is not None:
                                     mx, my = meas
