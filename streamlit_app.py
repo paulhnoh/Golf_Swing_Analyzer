@@ -39,6 +39,11 @@ with st.sidebar:
                                       help="실측 검증 결과, 이 모델은 샤프트보다 헤드 탐지가 훨씬 자주/정확하게 "
                                            "잡혔습니다. 끄면 실측 탐지율이 크게 떨어질 수 있으니 기본값(켜짐)을 "
                                            "권장합니다. 헤드 오탐이 의심되는 특정 영상에서만 꺼서 비교해보세요.")
+    dist_upper_mult = st.slider("거리 상한 배수 (× 어드레스 실측 손목-클럽 거리)", 1.0, 2.5, 1.6, 0.05,
+                                 help="어드레스에서 측정한 손목-클럽 거리의 이 배수를 넘는 후보는 물리적으로 "
+                                      "클럽일 수 없다고 보고 제외합니다. 너무 낮추면(예: 1.15) 팔로우스루처럼 "
+                                      "원근 효과로 2D상 거리가 어드레스보다 더 길게 보이는 구간의 진짜 탐지까지 "
+                                      "걸러져 오히려 실측 탐지율이 떨어질 수 있습니다 (실측 검증 완료).")
     st.divider()
     st.header("🏁 P13(정지) 판정")
     still_px_th = st.slider("정지 판정 임계값(px/frame)", 0.5, 8.0, 2.0, 0.5,
@@ -86,12 +91,13 @@ def create_kalman_2d(init_x, init_y):
     kf.statePost = np.array([[np.float32(init_x)], [np.float32(init_y)], [0], [0]], dtype=np.float32)
     return kf
 
-def detect_club_in_roi(frame, model, pred_x, pred_y, roi_half, wx, wy, conf_th, imgsz, ref_len=None, use_head=False):
+def detect_club_in_roi(frame, model, pred_x, pred_y, roi_half, wx, wy, conf_th, imgsz, ref_len=None, use_head=False, dist_upper_mult=1.6):
     """예측 위치(pred_x, pred_y) 주변만 잘라서 확대 탐지 -> 작은 헤드/샤프트 인식률 개선.
     후보는 예측 위치와의 거리로 게이팅해서 배경의 엉뚱한 오탐을 걸러낸다.
-    ref_len(=어드레스에서 실측한 손목-클럽 거리)이 주어지면, 카메라가 고정이라는 전제 하에
-    "어드레스가 손목-클럽 거리가 가장 긴 자세"라는 물리적 사실을 이용해, 그보다 훨씬 먼 후보는
-    절대 클럽이 아니라고 보고 제외한다 -> 얼굴/배경 등에 락이 걸리는 것을 방지.
+    ref_len(=어드레스에서 실측한 손목-클럽 거리)이 주어지면, dist_upper_mult배를 넘는 후보는
+    물리적으로 클럽일 수 없다고 보고 제외한다 -> 얼굴/배경 등에 락이 걸리는 것을 방지.
+    (주의: 원근 효과로 인해 어드레스보다 다른 phase에서 2D 거리가 더 길게 보일 수 있으므로,
+    배수를 너무 낮추면 오히려 진짜 탐지까지 걸러 실측 탐지율이 떨어질 수 있음 - 실측 검증됨)
     use_head=False면 헤드 클래스 탐지는 아예 후보에서 제외하고 샤프트만 사용한다.
     반환값: (point_or_None, rejected_by_distance_count) — 두 번째 값은 진단용으로,
     "물리적 거리 기준"으로 걸러진 오탐 후보가 이번 호출에서 몇 개였는지 알려준다."""
@@ -121,9 +127,10 @@ def detect_club_in_roi(frame, model, pred_x, pred_y, roi_half, wx, wy, conf_th, 
                 continue
             if ref_len is not None:
                 dist_wrist = math.hypot(cx - wx, cy - wy)
-                # 어드레스 실측 거리(ref_len)의 1.15배를 넘으면 물리적으로 클럽일 수 없다고 보고 제외
-                # (카메라 고정 + 어드레스가 팔+샤프트 최대 신장 상태라는 전제. 1.15는 측정/포즈 노이즈 여유분)
-                if dist_wrist < ref_len * 0.10 or dist_wrist > ref_len * 1.15:
+                # 어드레스 실측 거리(ref_len)의 dist_upper_mult배를 넘으면 물리적으로 클럽일 수 없다고 보고 제외
+                # (카메라 고정 전제. 배수는 사이드바에서 조절 가능 - 너무 낮추면 원근 효과로 어드레스보다
+                # 2D 거리가 더 길게 보이는 구간의 진짜 탐지까지 걸러질 수 있음)
+                if dist_wrist < ref_len * 0.10 or dist_wrist > ref_len * dist_upper_mult:
                     rejected_by_distance += 1
                     continue
             is_head = 'head' in cls_name or 'club' in cls_name
@@ -356,7 +363,8 @@ if uploaded_file:
                                                            cur_radius, row['WX'], row['WY'],
                                                            effective_conf, det_imgsz,
                                                            ref_len=st.session_state.ref_club_len,
-                                                           use_head=use_head_detection)
+                                                           use_head=use_head_detection,
+                                                           dist_upper_mult=dist_upper_mult)
 
                                 if meas is not None:
                                     mx, my = meas
@@ -621,7 +629,7 @@ if uploaded_file:
                     is_measured = st.session_state.get('ref_club_len_is_measured', False)
                     len_note = "어드레스에서 실측" if is_measured else "실측 실패 → 화면폭의 30%로 대체"
                     st.caption(f"📏 기준 클럽 길이: {st.session_state.ref_club_len:.0f}px ({len_note}) — "
-                               f"이 거리(×1.15)를 넘는 후보는 물리적으로 클럽일 수 없다고 보고 자동 제외됩니다.")
+                               f"이 거리(×{dist_upper_mult:.2f})를 넘는 후보는 물리적으로 클럽일 수 없다고 보고 자동 제외됩니다.")
                     st.caption(f"🚫 물리적 거리 기준으로 제외된 오탐 후보: 총 {total_rejected}개 "
                                f"({frames_with_rejection}개 프레임에서 발생)")
 
@@ -649,11 +657,12 @@ if uploaded_file:
                 st.caption("여러 phase가 같은 프레임으로 뭉쳐 나올 때, 실제로 그 구간에서 각도가 얼마나 빠르게 "
                            "변했는지 눈으로 확인할 수 있습니다. 급격한 수직에 가까운 구간이면 촬영 프레임 사이로 "
                            "목표각도가 스쳐 지나갔을 가능성이 큽니다.")
-                chart_df = st.session_state.df.set_index('Frame')[['SA_Smooth', 'LA_Smooth', 'RA_Smooth', 'GA_Smooth']]
+                chart_df = st.session_state.df.set_index('Frame')[['SA_Smooth', 'LA_Smooth', 'RA_Smooth']]
                 st.line_chart(chart_df)
-                st.caption("GA_Smooth(그립 벡터 기반 샤프트 추정치)가 SA_Smooth(실제 클럽 탐지 기반)와 "
-                           "비슷한 궤적을 그리면, 클럽 탐지가 약한 구간에서 보조 신호로 쓸 수 있다는 뜻입니다. "
-                           "다만 두 손목 사이 거리가 짧아 노이즈가 클 수 있으니 참고용으로만 봐주세요.")
+                # 참고: GA_Smooth(그립 벡터 기반 샤프트 추정치)는 실측 검증 결과 두 손목 사이 거리가
+                # 너무 짧아(그립 폭 수준) 사소한 keypoint 오차에도 각도가 크게 튀는 것으로 확인되어
+                # (0°/350° 사이를 반복적으로 오가는 노이즈), 신뢰할 수 있는 보조 신호로 부적합하다고
+                # 판단해 화면 표시에서 제외했다. 계산 자체는 df['GA_Smooth']에 남겨뒀다.
 
         st.subheader("📸 청사진(Compass) 좌/우타 동기화 뷰")
         cols = st.columns(4)
