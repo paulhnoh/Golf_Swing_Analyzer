@@ -490,6 +490,11 @@ if uploaded_file:
 
                 db_data.append(row)
             cap.release()
+            # cv2.CAP_PROP_FRAME_COUNT는 코덱/컨테이너에 따라 실제보다 부풀려질 수 있어서,
+            # 루프가 중간에 끊기면 tot_frames(슬라이더 최댓값 등에 쓰임)와 실제 저장된 프레임 수가
+            # 어긋나 마지막 프레임 이미지가 없어 검정 화면이 뜨는 버그가 있었다.
+            # 실제로 처리된 프레임 수로 tot_frames를 다시 맞춘다.
+            tot_frames = len(db_data)
             st.session_state.debug_detect_log = pd.DataFrame(debug_detect_log)
 
         with st.spinner("2단계: 데이터 정제 및 안정화 처리 중..."):
