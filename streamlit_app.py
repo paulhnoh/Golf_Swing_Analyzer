@@ -35,10 +35,10 @@ with st.sidebar:
                                      help="칼만 예측 위치를 중심으로 이 반경 안에서만 클럽을 찾습니다. 너무 좁으면 빠른 스윙 구간에서 놓칩니다.")
     det_imgsz = st.select_slider("ROI 탐지 해상도(imgsz)", options=[320, 480, 640, 800, 960], value=640,
                                   help="크롭된 영역을 이 크기로 확대해서 탐지합니다. 작은 헤드/샤프트일수록 높이는 게 유리합니다.")
-    use_head_detection = st.checkbox("클럽 헤드 탐지도 사용", value=False,
-                                      help="꺼두면(기본값) 헤드 탐지는 무시하고 샤프트 탐지만 사용합니다. "
-                                           "실측 결과 헤드가 배경/손 등으로 오탐되는 경우가 샤프트보다 훨씬 잦아서, "
-                                           "기본은 꺼둔 상태를 권장합니다.")
+    use_head_detection = st.checkbox("클럽 헤드 탐지도 사용", value=True,
+                                      help="실측 검증 결과, 이 모델은 샤프트보다 헤드 탐지가 훨씬 자주/정확하게 "
+                                           "잡혔습니다. 끄면 실측 탐지율이 크게 떨어질 수 있으니 기본값(켜짐)을 "
+                                           "권장합니다. 헤드 오탐이 의심되는 특정 영상에서만 꺼서 비교해보세요.")
     st.divider()
     st.header("🏁 P13(정지) 판정")
     still_px_th = st.slider("정지 판정 임계값(px/frame)", 0.5, 8.0, 2.0, 0.5,
@@ -89,23 +89,26 @@ def create_kalman_2d(init_x, init_y):
 def detect_club_in_roi(frame, model, pred_x, pred_y, roi_half, wx, wy, conf_th, imgsz, ref_len=None, use_head=False):
     """예측 위치(pred_x, pred_y) 주변만 잘라서 확대 탐지 -> 작은 헤드/샤프트 인식률 개선.
     후보는 예측 위치와의 거리로 게이팅해서 배경의 엉뚱한 오탐을 걸러낸다.
-    ref_len이 주어지면, 손목(wx,wy)로부터 물리적으로 말이 안 되는 거리(클럽 길이 대비 너무 가깝거나
-    너무 먼)의 후보도 추가로 제외한다 -> 얼굴/배경 등에 락이 걸리는 것을 방지.
-    use_head=False(기본값)이면 헤드 클래스 탐지는 아예 후보에서 제외하고 샤프트만 사용한다
-    -> 실측 결과 헤드 오탐이 샤프트보다 훨씬 잦았기 때문에, 오탐이 적은 샤프트만 신뢰한다."""
+    ref_len(=어드레스에서 실측한 손목-클럽 거리)이 주어지면, 카메라가 고정이라는 전제 하에
+    "어드레스가 손목-클럽 거리가 가장 긴 자세"라는 물리적 사실을 이용해, 그보다 훨씬 먼 후보는
+    절대 클럽이 아니라고 보고 제외한다 -> 얼굴/배경 등에 락이 걸리는 것을 방지.
+    use_head=False면 헤드 클래스 탐지는 아예 후보에서 제외하고 샤프트만 사용한다.
+    반환값: (point_or_None, rejected_by_distance_count) — 두 번째 값은 진단용으로,
+    "물리적 거리 기준"으로 걸러진 오탐 후보가 이번 호출에서 몇 개였는지 알려준다."""
     h, w = frame.shape[:2]
     x0, y0 = max(0, int(pred_x - roi_half)), max(0, int(pred_y - roi_half))
     x1, y1 = min(w, int(pred_x + roi_half)), min(h, int(pred_y + roi_half))
     if x1 - x0 < 20 or y1 - y0 < 20:
-        return None
+        return None, 0
 
     crop = frame[y0:y1, x0:x1]
     try:
         c_res = model(crop, verbose=False, conf=conf_th, imgsz=imgsz)[0]
     except Exception:
-        return None
+        return None, 0
 
     head_c, shaft_c = [], []
+    rejected_by_distance = 0
     if c_res.boxes is not None and len(c_res.boxes) > 0:
         for box in c_res.boxes:
             conf = float(box.conf[0].item())
@@ -118,8 +121,11 @@ def detect_club_in_roi(frame, model, pred_x, pred_y, roi_half, wx, wy, conf_th, 
                 continue
             if ref_len is not None:
                 dist_wrist = math.hypot(cx - wx, cy - wy)
-                if dist_wrist < ref_len * 0.12 or dist_wrist > ref_len * 1.8:
-                    continue  # 손목 기준 클럽 길이로 봤을 때 물리적으로 말이 안 되는 위치 -> 제외
+                # 어드레스 실측 거리(ref_len)의 1.15배를 넘으면 물리적으로 클럽일 수 없다고 보고 제외
+                # (카메라 고정 + 어드레스가 팔+샤프트 최대 신장 상태라는 전제. 1.15는 측정/포즈 노이즈 여유분)
+                if dist_wrist < ref_len * 0.10 or dist_wrist > ref_len * 1.15:
+                    rejected_by_distance += 1
+                    continue
             is_head = 'head' in cls_name or 'club' in cls_name
             if is_head:
                 if use_head:
@@ -128,15 +134,16 @@ def detect_club_in_roi(frame, model, pred_x, pred_y, roi_half, wx, wy, conf_th, 
             else:
                 shaft_c.append((cx, cy, conf, dist_pred))
 
-    # 샤프트를 우선한다 (실측 검증 결과 헤드보다 오탐이 훨씬 적음). 헤드는 use_head=True일 때만,
-    # 그리고 샤프트가 하나도 없을 때만 보조적으로 사용한다.
-    if shaft_c:
-        best = max(shaft_c, key=lambda x: x[2] - 0.35 * (x[3] / max(roi_half, 1)))
-        return best[0], best[1]
+    # 실측 검증 결과: 이 모델은 헤드 탐지가 샤프트보다 훨씬 자주/안정적으로 잡힌다
+    # (샤프트만 쓰면 실측 탐지율이 92%->6%로 폭락하는 것을 확인함). 따라서 헤드를 우선하고,
+    # 헤드가 하나도 없을 때만 샤프트를 보조로 사용한다 (use_head=False면 헤드는 애초에 후보에서 제외됨).
     if head_c:
         best = max(head_c, key=lambda x: x[2] - 0.15 * (x[3] / max(roi_half, 1)))
-        return best[0], best[1]
-    return None
+        return (best[0], best[1]), rejected_by_distance
+    if shaft_c:
+        best = max(shaft_c, key=lambda x: x[2] - 0.35 * (x[3] / max(roi_half, 1)))
+        return (best[0], best[1]), rejected_by_distance
+    return None, rejected_by_distance
 
 def find_closest_frame(df, col, target, start_f, end_f, fail_diff_threshold=60.0):
     """구간 [start_f, end_f] 안에서 target 각도와 가장 가까운 프레임을 찾는다.
@@ -244,15 +251,37 @@ if uploaded_file:
             
             try:
                 p_res = pose_model(f_frame, verbose=False)[0]
+                addr_wx, addr_wy = None, None
                 if p_res.keypoints is not None and len(p_res.keypoints.xy) > 0:
                     kp = p_res.keypoints.xy[0].cpu().numpy()
+                    cf0 = p_res.keypoints.conf[0].cpu().numpy() if p_res.keypoints.conf is not None else np.ones(17)
                     if len(kp) > 16 and kp[15][0] > 0 and kp[16][0] > 0:
                         p1_gp = ((int(kp[15][0]), int(kp[15][1])), (int(kp[16][0]), int(kp[16][1])))
+                    # 어드레스 프레임의 손목 위치도 구해서, 실제 "손목-클럽" 거리 측정에 사용
+                    if len(kp) > 10:
+                        wrist_pts = [kp[i] for i in (9, 10) if kp[i][0] > 0 and cf0[i] > 0.05]
+                        if wrist_pts:
+                            addr_wx = float(np.mean([p[0] for p in wrist_pts]))
+                            addr_wy = float(np.mean([p[1] for p in wrist_pts]))
             except Exception:
-                pass
+                addr_wx, addr_wy = None, None
 
             st.session_state.p1_gp = p1_gp
-            st.session_state.ref_club_len = f_frame.shape[1] * 0.3
+
+            # 기준 클럽 길이: 카메라가 고정이므로, 어드레스(첫 프레임)에서 팔+샤프트가 지면까지
+            # 최대로 뻗은 상태의 "손목-클럽" 거리가 영상 전체에서 나올 수 있는 최대 거리다.
+            # 이 실측값을 우선 사용하고, 탐지 실패 시에만 화면너비의 30%로 대체한다.
+            measured_len = None
+            if addr_wx is not None:
+                init_radius = f_frame.shape[1] * 0.35
+                meas0 = detect_club_in_roi(f_frame, custom_model, addr_wx, addr_wy, init_radius,
+                                            addr_wx, addr_wy, conf_th, det_imgsz,
+                                            ref_len=None, use_head=True)
+                if meas0[0] is not None:
+                    measured_len = math.hypot(meas0[0][0] - addr_wx, meas0[0][1] - addr_wy)
+
+            st.session_state.ref_club_len = measured_len if measured_len else f_frame.shape[1] * 0.3
+            st.session_state.ref_club_len_is_measured = measured_len is not None
 
             db_data = []
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -277,6 +306,7 @@ if uploaded_file:
                        'LX': np.nan, 'LY': np.nan, 'RX': np.nan, 'RY': np.nan,
                        'RWX': np.nan, 'RWY': np.nan, 'LWX': np.nan, 'LWY': np.nan, 'T_Predicted': False}
                 det_status = 'no_wrist'
+                n_rejected_dist = 0
 
                 try:
                     p_res = pose_model(frame, verbose=False)[0]
@@ -322,7 +352,7 @@ if uploaded_file:
                                 # (오탐이 섞여도 다음 프레임부터 칼만 거리 게이팅으로 곧 걸러짐)
                                 effective_conf = max(0.05, conf_th * 0.6) if reacquiring else conf_th
 
-                                meas = detect_club_in_roi(frame, custom_model, pred_x, pred_y,
+                                meas, n_rejected_dist = detect_club_in_roi(frame, custom_model, pred_x, pred_y,
                                                            cur_radius, row['WX'], row['WY'],
                                                            effective_conf, det_imgsz,
                                                            ref_len=st.session_state.ref_club_len,
@@ -373,7 +403,7 @@ if uploaded_file:
                 except Exception:
                     pass
 
-                debug_detect_log.append({'Frame': fn, 'status': det_status})
+                debug_detect_log.append({'Frame': fn, 'status': det_status, 'rejected_by_distance': n_rejected_dist})
 
                 db_data.append(row)
             cap.release()
@@ -411,6 +441,11 @@ if uploaded_file:
                 # 스무딩을 거치지 않은(median 필터까지만 적용된) "순간" 각도도 같이 계산해둔다.
                 # 스무딩값과 크게 차이나면 "지연" 문제, 순간값 자체도 부정확하면 "탐지" 문제로 구분 가능.
                 df.loc[i, 'SA_Instant'] = get_blueprint_angle(df.loc[i, 'WX'], df.loc[i, 'WY'], df.loc[i, 'TX'], df.loc[i, 'TY'], p1_gp[0], p1_gp[1])
+                # 그립(양손) 벡터 기반 샤프트 방향 추정치. 실제 그립에서는 왼손이 오른손보다 샤프트 butt쪽에,
+                # 오른손이 헤드쪽에 가깝게 잡기 때문에(오른손 기준), 왼손->오른손 벡터가 샤프트의 국소적인
+                # 방향과 대략 일치할 수 있다. 다만 두 손목 사이 거리가 원래 짧아서(그립 폭만큼), 아주 작은
+                # 좌표 오차에도 각도가 크게 흔들릴 수 있음 -> 클럽 탐지 실패 시의 "보조/대체 신호"로만 참고할 것.
+                df.loc[i, 'GA_Smooth'] = get_blueprint_angle(df.loc[i, 'LWX_Smooth'], df.loc[i, 'LWY_Smooth'], df.loc[i, 'RWX_Smooth'], df.loc[i, 'RWY_Smooth'], p1_gp[0], p1_gp[1])
 
         with st.spinner("3단계: 시퀀스 타임라인 매칭 중..."):
             # ⚠️ 현재 버전은 단순화를 위해 "오른손 선수 전용"입니다 (좌타 판별 로직 제거).
@@ -464,20 +499,20 @@ if uploaded_file:
             except:
                 p8 = p5 + (tot_frames - p5) // 2
 
-            # P13(피니시 정지): 전체 스윙이 끝나고 손목+클럽의 움직임이 2~3프레임 이상
-            # 거의 없어지는 첫 시점을 찾는다. 못 찾으면 마지막 프레임으로 대체.
+            # P13(피니시 정지): "2프레임 연속으로 움직임이 거의 없어지는 첫 번째 시점" (사용자 정의).
+            # 못 찾으면 마지막 프레임으로 대체.
             try:
                 search_start = min(p12 + 3, tot_frames - 1)
                 wrist_disp = np.hypot(df['WX_Smooth'].diff(), df['WY_Smooth'].diff())
                 club_disp = np.hypot(df['TX_Smooth'].diff(), df['TY_Smooth'].diff())
                 combined_disp = wrist_disp.fillna(999.0) + club_disp.fillna(0.0) * 0.5
 
-                p13 = tot_frames - 1
-                STILL_WINDOW = 5   # 3프레임은 팔로우스루 중 짧은 멈칫함에도 오탐될 수 있어 5프레임으로 강화
+                p13 = tot_frames - 1  # 기본값: 정지 구간을 못 찾으면 마지막 프레임
+                STILL_WINDOW = 2
                 for idx in range(search_start, max(search_start, tot_frames - STILL_WINDOW - 1)):
                     window = combined_disp.iloc[idx: idx + STILL_WINDOW]
                     if len(window) == STILL_WINDOW and (window < still_px_th).all():
-                        p13 = idx
+                        p13 = idx  # 첫 번째로 발견된 정지 구간 채택
                         break
             except Exception:
                 p13 = tot_frames - 1
@@ -580,6 +615,16 @@ if uploaded_file:
                 c2.metric("칼만 예측으로 보완", f"{n_pred}/{total}", f"{n_pred/total*100:.0f}%")
                 c3.metric("완전 미탐지(락 상실/확인대기)", f"{n_lost}/{total}", f"{n_lost/total*100:.0f}%")
 
+                if 'rejected_by_distance' in dbg.columns:
+                    total_rejected = int(dbg['rejected_by_distance'].sum())
+                    frames_with_rejection = int((dbg['rejected_by_distance'] > 0).sum())
+                    is_measured = st.session_state.get('ref_club_len_is_measured', False)
+                    len_note = "어드레스에서 실측" if is_measured else "실측 실패 → 화면폭의 30%로 대체"
+                    st.caption(f"📏 기준 클럽 길이: {st.session_state.ref_club_len:.0f}px ({len_note}) — "
+                               f"이 거리(×1.15)를 넘는 후보는 물리적으로 클럽일 수 없다고 보고 자동 제외됩니다.")
+                    st.caption(f"🚫 물리적 거리 기준으로 제외된 오탐 후보: 총 {total_rejected}개 "
+                               f"({frames_with_rejection}개 프레임에서 발생)")
+
                 # 연속 미탐지(lost/pending) 구간을 찾아 프레임 범위로 보여줌 -> 실측값과 대조하기 쉬움
                 lost_mask = dbg['status'].isin(['lost', 'pending']).to_numpy()
                 ranges = []
@@ -604,8 +649,11 @@ if uploaded_file:
                 st.caption("여러 phase가 같은 프레임으로 뭉쳐 나올 때, 실제로 그 구간에서 각도가 얼마나 빠르게 "
                            "변했는지 눈으로 확인할 수 있습니다. 급격한 수직에 가까운 구간이면 촬영 프레임 사이로 "
                            "목표각도가 스쳐 지나갔을 가능성이 큽니다.")
-                chart_df = st.session_state.df.set_index('Frame')[['SA_Smooth', 'LA_Smooth', 'RA_Smooth']]
+                chart_df = st.session_state.df.set_index('Frame')[['SA_Smooth', 'LA_Smooth', 'RA_Smooth', 'GA_Smooth']]
                 st.line_chart(chart_df)
+                st.caption("GA_Smooth(그립 벡터 기반 샤프트 추정치)가 SA_Smooth(실제 클럽 탐지 기반)와 "
+                           "비슷한 궤적을 그리면, 클럽 탐지가 약한 구간에서 보조 신호로 쓸 수 있다는 뜻입니다. "
+                           "다만 두 손목 사이 거리가 짧아 노이즈가 클 수 있으니 참고용으로만 봐주세요.")
 
         st.subheader("📸 청사진(Compass) 좌/우타 동기화 뷰")
         cols = st.columns(4)
@@ -666,4 +714,11 @@ if uploaded_file:
                 if row is not None and p['type'] == 'shaft' and not pd.isna(row.get('SA_Instant', np.nan)):
                     debug_tag = f" · [스무딩 {row['SA_Smooth']:.1f}° / 순간 {row['SA_Instant']:.1f}°]"
 
-                st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption=f"[{p['phase']}] {p['name']} ({status}){pred_tag}{est_tag}{debug_tag}", use_column_width=True)
+                reject_tag = ""
+                dbg_log = st.session_state.get('debug_detect_log')
+                if dbg_log is not None and 'rejected_by_distance' in dbg_log.columns:
+                    match = dbg_log[dbg_log['Frame'] == fn]
+                    if not match.empty and int(match['rejected_by_distance'].iloc[0]) > 0:
+                        reject_tag = f" · 🚫거리기준 오탐 {int(match['rejected_by_distance'].iloc[0])}개 제외됨"
+
+                st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption=f"[{p['phase']}] {p['name']} ({status}){pred_tag}{est_tag}{debug_tag}{reject_tag}", use_column_width=True)
