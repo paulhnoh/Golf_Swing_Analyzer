@@ -205,6 +205,47 @@ def detect_shaft_hough(frame, wx, wy, roi_half, ref_len=None, upper_mult=1.6):
 
     return best_far
 
+def find_adaptive_top(df, col, tot_frames, start_frac=0.65, max_frac=0.92, step=0.08, edge_margin=3):
+    """왼손목(또는 오른손목) 최고점(=Y좌표 최소) 프레임을 찾되, 고정된 탐색 구간 비율(예: 0.65)이
+    실제 백스윙 템포보다 너무 좁으면 진짜 탑이 아직 안 나온 상태에서 구간 경계값을 탑으로
+    잘못 채택하는 문제가 있었다 (예: 실제 탑은 전체의 68~70%에서 나오는데 0~65% 안에서만 찾다보니
+    그 구간의 마지막 근처 프레임이 "가짜 탑"으로 뽑힘).
+    이를 방지하기 위해, 찾은 후보가 탐색 구간의 끝(edge_margin 프레임 이내)에 걸려있으면
+    -> 아직 진짜 최저점(=최고 높이)을 못 찾았을 가능성이 크다고 보고 구간을 step만큼 넓혀 재탐색한다.
+    후보가 구간 중간에서 나오면(=국소 최솟값이 확실히 관측됨) 그 시점에서 확정한다.
+    """
+    frac = start_frac
+    cand = int(tot_frames * 0.3)
+    while frac <= max_frac + 1e-9:
+        end_idx = max(2, int(tot_frames * frac))
+        sub = df[col].iloc[:end_idx]
+        if sub.notna().any():
+            cand = int(sub.idxmin())
+            if cand < end_idx - edge_margin or frac >= max_frac:
+                break
+        frac += step
+    return cand
+
+
+def enforce_monotonic_segment(auto_f, auto_f_estimated, keys, start_bound, end_bound):
+    """P1<P2<...<P13처럼 스윙은 시간순으로 항상 증가해야 하는데, 개별 phase를 각도 매칭으로
+    독립적으로 찾다 보면(특히 각도가 프레임 사이에서 급격히 튀는 구간) 순서가 역전되거나
+    두 phase가 같은 프레임으로 뭉치는 경우가 생긴다 (예: P7이 P8보다 뒤 프레임으로 잡히거나,
+    P9와 P10이 같은 프레임으로 겹치는 경우). 이를 마지막 단계에서 강제로 보정한다:
+    각 구간(start_bound, end_bound) 안에서 keys를 순서대로 확인하며, 이전 phase보다
+    작거나 같으면(=역전/중복) 이전+1 프레임으로 밀어내고 추정값으로 표시한다."""
+    prev = start_bound
+    for k in keys:
+        if k not in auto_f:
+            continue
+        v = auto_f[k]
+        if v <= prev or v >= end_bound:
+            v = min(prev + 1, end_bound - 1)
+            auto_f_estimated[k] = True
+        auto_f[k] = v
+        prev = v
+
+
 def find_closest_frame(df, col, target, start_f, end_f, fail_diff_threshold=60.0):
     """구간 [start_f, end_f] 안에서 target 각도와 가장 가까운 프레임을 찾는다.
     반환: (frame, is_estimated) - is_estimated=True면 신뢰할 수 없는 매칭이라는 뜻.
@@ -539,7 +580,12 @@ if uploaded_file:
             # ⚠️ 현재 버전은 단순화를 위해 "오른손 선수 전용"입니다 (좌타 판별 로직 제거).
             # P5(백스윙 탑)=왼손목 최고점, P12(팔로우스루 탑)=오른손목 최고점을 직접 사용합니다.
             try:
-                p5 = int(df['LWY_Smooth'].iloc[:int(tot_frames * 0.65)].idxmin())
+                # 고정 65% 구간 안에서만 찾으면, 백스윙 템포가 느린 스윙에서는 진짜 탑이
+                # 구간 밖에 있어 구간 경계 근처 프레임이 "가짜 탑"으로 잘못 채택되는 문제가
+                # 있었다. find_adaptive_top()은 후보가 구간 경계에 걸리면 자동으로 탐색 구간을
+                # 넓혀가며 재탐색한다 (실측 검증: 기존 방식은 실제 98프레임인 탑을 91프레임으로
+                # 오판정했고, 그 여파로 P4/P6~P12까지 전부 앞으로 밀리는 연쇄 오류가 있었음).
+                p5 = find_adaptive_top(df, 'LWY_Smooth', tot_frames, start_frac=0.65, max_frac=0.92, step=0.08)
             except:
                 p5 = int(tot_frames * 0.3)
 
@@ -680,6 +726,16 @@ if uploaded_file:
                     if not real_hits.empty:
                         nearest = (real_hits.index.to_series() - f0).abs().idxmin()
                         auto_f[ph] = int(nearest)
+
+            # --- 순서(monotonicity) 강제 보정 ---
+            # P1<P2<...<P13은 항상 시간순으로 증가해야 하지만, 개별 phase를 각도 매칭으로
+            # 독립적으로 찾다 보면(특히 SA_Smooth가 프레임 사이에서 급격히 튀는 구간에서)
+            # 두 phase가 같은 프레임으로 뭉치거나(P4==P5, P9==P10) 순서가 역전(P7>P8)되는
+            # 사례가 실측 검증에서 확인됨. P1/P5/P8/P12/P13은 고정 앵커로 두고, 그 사이
+            # 구간(P2~P4 / P6~P7 / P9~P11)에 대해서만 순서를 강제로 재정렬한다.
+            enforce_monotonic_segment(auto_f, auto_f_estimated, ["P2", "P3", "P4"], auto_f["P1"], auto_f["P5"])
+            enforce_monotonic_segment(auto_f, auto_f_estimated, ["P6", "P7"], auto_f["P5"], auto_f["P8"])
+            enforce_monotonic_segment(auto_f, auto_f_estimated, ["P9", "P10", "P11"], auto_f["P8"], auto_f["P12"])
 
             st.session_state.auto_f_estimated = auto_f_estimated
 
